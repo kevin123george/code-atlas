@@ -15,8 +15,14 @@ kitty keyboard protocol (Ghostty, kitty, WezTerm, iTerm2 with "CSI u" on): it is
 
 ## Stack
 Rust 2021 (Mac: `~/.cargo/bin`, not on PATH; laptop: pacman `rust`). `ratatui` 0.29 + `crossterm` 0.28 (screen,
-input), `ropey` (text buffer), `unicode-width`, `ignore` (ripgrep's gitignore-aware walker, project view). Planned: `tree-sitter` (highlighting), `lsp-types` + own JSON-RPC
-client (LSP), `portable-pty` + `vt100` (terminal pane), `git` CLI or `gix` (git).
+input), `ropey` (text buffer), `unicode-width`, `ignore` (ripgrep's gitignore-aware walker, project view),
+`tree-sitter` 0.27 + grammar crates (rust, typescript/tsx, javascript, java, python, json, toml-ng, md, bash; their
+bundled highlight queries) for highlighting, `lsp-types` 0.97 + `serde_json` with an own JSON-RPC client (LSP).
+Planned: `portable-pty` + `vt100` (terminal pane), `git` CLI or `gix` (git).
+Language servers are found on PATH plus `~/.cargo/bin`, `~/.local/bin`, `~/.bun/bin`, `/opt/homebrew/bin`,
+`/usr/local/bin`: rust-analyzer (Mac: `rustup component add rust-analyzer rustfmt`, both added 2026-10-25),
+typescript-language-server, pyright-langserver / basedpyright-langserver / pylsp, jdtls. Missing ones are skipped
+with a status message.
 
 ## Layout
 - `src/main.rs` – terminal setup/restore, event loop.
@@ -35,12 +41,22 @@ client (LSP), `portable-pty` + `vt100` (terminal pane), `git` CLI or `gix` (git)
   Hooks elsewhere: `App.vim` + `App::key` (Vim first, then `idea_key`), `App::vim_effect`, `after_ide` calls after
   prompts/mouse/paste/project keys; `ui::block_cursor` + mode badge, showcmd and command line in the status bar;
   `Doc::begin_group`/`end_group`/`replace`/`indent`/`set_want_col`/`content_lines` helpers in `doc.rs`.
+- `src/syntax/` – code smarts without a server (M3): `mod.rs` `Lang` (detection by name/extension/`#!`, status-bar
+  name, comment token, LSP id), capture name → `Token`, per-doc `Syntax` (parser + tree, incremental reparse,
+  visible-lines cache); `comment.rs` Ctrl+/ toggling. Colours: `ui::theme::token_style`.
+- `src/lsp/` – LSP client (M3): `mod.rs` `Lsp` state + `impl App` (sync, requests, responses, keys, diagnostics for
+  the screen); `server.rs` server table, project root, PATH lookup, process + threads, `CATLAS_LSP_LOG`;
+  `jsonrpc.rs` framing; `text.rs` UTF-16 positions, file URIs, applying `TextEdit`s, snippet stripping;
+  `popup.rs` completion / hover / quick-fix popups. Hooks elsewhere: `Doc.syntax`, `Doc::rev`/`edit_with`/
+  `set_path`/`line_span` (pub), `App.lsp`, `smart_key`/`smart_after_key` in `App::handle`, `PromptKind::Rename`,
+  `lsp_did_save` in `App::save`, Ctrl+/ in `App::key`, `app.lsp_tick()` in the main loop (30 ms poll, draws only
+  when something changed or every 250 ms), highlighting/diagnostics/popup/language in `ui.rs`.
 - `docs/ROADMAP.md` – milestones and who owns which files. `docs/decisions/` – project decisions.
 
 ## Run & test
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo test                 # unit tests (doc.rs edit logic, project tree/fuzzy/search, Vim engine)
+cargo test                 # unit tests (doc.rs edit logic, project tree/fuzzy/search, Vim engine, syntax, comments, LSP)
 cargo run -- some/file.rs  # try it
 cargo build --release      # target/release/catlas
 ```
@@ -87,6 +103,22 @@ None yet. Later: `cargo install --path .` on the Mac and the laptop.
 | Ctrl+Shift+F, **Alt+F** | Find in Files (selection pre-fills it; smart case), Enter opens at the match, selected |
 | Ctrl+E | Recent Files (previous file preselected, type to filter) |
 | in popups | Backspace, Ctrl+Backspace / Ctrl+H word, Ctrl+U clear, Esc close; mouse click opens a row, wheel scrolls |
+
+## Keys (code smarts)
+| Key | Does |
+|---|---|
+| Ctrl+/ (also arrives as Ctrl+7, Ctrl+_) | comment / uncomment the line or selected lines (`//` or `#`; JSON, Markdown have none) |
+| Ctrl+Space | completion; also opens by itself after `.` (and `::` in Rust). ↑↓ PgUp PgDn, Enter/Tab accept, Esc close, typing filters (fuzzy) |
+| Ctrl+B | go to definition (opens or switches the tab) · **Ctrl+Alt+←** back |
+| **F1** | quick documentation (hover). IDEA's Ctrl+Q is quit here. ↑↓ scroll, Esc or any key closes |
+| Shift+F6 | rename symbol (prompt pre-filled with the word); files changed elsewhere open as unsaved tabs |
+| Ctrl+Alt+L | reformat file (server's formatter, e.g. rustfmt) |
+| Alt+Enter | quick fixes / intentions (code actions) at the cursor, preferred first |
+Diagnostics: ● in the gutter (red error, yellow warning, blue info; hints hidden), coloured underline, and the
+message in the status bar when the cursor is on it.
+In Vim normal/visual mode Ctrl+B stays Vim's page up and `.` stays repeat: go to definition is **Ctrl+]** there,
+and completion opens by itself only in insert mode. The language name sits before the IDEA/Vim mode badge. Server progress ("rust-analyzer: Indexing 40%") shows there too.
+
 - New features go in their own module (`src/<feature>/…`) with a small hook in `app.rs`/`ui.rs`, so parallel work
   doesn't collide.
 
@@ -137,6 +169,16 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
   Mouse clicks can be sent as SGR sequences: `tmux send-keys -t s -l $'\e[<0;COL;ROWM\e[<0;COL;ROWm'` (1-based).
 - Find in files honours `.gitignore` even outside git repos (like `rg --no-require-git`), so e.g. a `.venv`
   listed in a non-git folder's `.gitignore` is skipped; plain `rg` would search it.
+- Highlighting: Rust's bundled query tags integer literals `@constant.builtin`; `syntax::refine` recolours numeric
+  node kinds as numbers. TS/TSX highlighting = the TypeScript query + JavaScript's (+ JSX); Markdown uses the block
+  grammar only (no inline emphasis/links yet).
+- Language servers inherit a PATH with their own folder first, else rust-analyzer can't find `cargo`/`rustfmt`
+  when `~/.cargo/bin` isn't on PATH. rust-analyzer answers formatting with `null` when rustfmt is missing.
+- Positions to and from servers are UTF-16 (`lsp::text::{to_lsp, from_lsp}`); never send char columns.
+- Debug a server: `CATLAS_LSP_LOG=/tmp/lsp.log catlas file.rs` logs every message (first 2000 chars).
+- rust-analyzer needs ~1–2 min to index this crate on the Mac before diagnostics/definitions come; cargo-check
+  diagnostics come after a save (didSave).
+- Ctrl+Alt+L / Alt+Enter / F1 need "Option as Meta" on macOS terminals for the Alt part.
 - System clipboard: copy goes out via pbcopy / wl-copy / xclip / OSC 52; paste from outside arrives as a
   bracketed paste (Cmd+V / Ctrl+Shift+V), Ctrl+V pastes the editor's own clipboard.
 
@@ -144,6 +186,7 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 `docs/decisions/0001-stack-and-keymap.md` – Rust + ratatui, IDEA keys by default, Vim optional, internal tool.
 `docs/decisions/0002-project-view.md` – M2 choices: args, ignore rules, own fuzzy scorer, smart-case find in files, fallback keys.
 `docs/decisions/0003-vim-mode.md` – M4 choices: who gets which key, undo groups, register, `:q` per tab, plain-text search.
+`docs/decisions/0004-code-smarts.md` – M3 choices: own query cursor + diff-based incremental parse, full-text sync, F1 hover, no snippets.
 
 ## Current state (2026-10-25)
 M1 core editing done (tabs, undo/redo, selection, bracket pairing, smart Enter/Home, duplicate/delete/move line,
@@ -161,3 +204,10 @@ M4 Vim mode done 2026-10-25 (see Keys (Vim mode)): 60 engine tests (several hund
 Not done yet: named registers and `"`, marks, macros (`q`/`@`), Ctrl+V block visual, Ctrl+D/U/O/I (IDEA keeps
 Ctrl+D), `gv`, `ge`, regex search/substitute, `:set`, a Vim toggle in the settings file / command palette (M7),
 and an e2e scenario file for Vim (`tests/e2e/scenarios/vim.sh`, QA's area).
+M3 code smarts done 2026-10-25: tree-sitter highlighting for 10 languages (5,000+ line file: ~1 ms per keystroke
+in release, ~10 ms debug), language in the status bar, Ctrl+/ comments, LSP client with diagnostics, completion,
+go to definition + back, hover, rename, format, quick fixes; verified with rust-analyzer in tmux. Not done yet:
+TypeScript/Python/Java servers untested here (none installed on the Mac; missing-server message checked),
+no e2e scenarios for M3 in `tests/e2e/` (QA's harness; needs a server, so they'd be slow), no signature help,
+find usages (Alt+F7), semantic tokens, inline Markdown, file create/rename ops in workspace edits, or completion
+item resolve (docs in the list).
