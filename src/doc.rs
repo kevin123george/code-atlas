@@ -158,8 +158,15 @@ impl Doc {
         self.cursor - self.line_start(self.line())
     }
 
-    /// Number of lines a user sees: a final line break doesn't open an extra empty line.
+    /// Number of lines drawn and reachable by the cursor. As in IntelliJ, a final line break opens
+    /// one more (empty) line.
     pub fn visible_lines(&self) -> usize {
+        self.rope.len_lines()
+    }
+
+    /// Lines with content: the empty line after a final line break doesn't count. Line moves and
+    /// deletes use this so the file's final line break stays where it is.
+    fn content_lines(&self) -> usize {
         let n = self.rope.len_lines();
         if n > 1 && self.rope.line(n - 1).len_chars() == 0 { n - 1 } else { n }
     }
@@ -644,7 +651,7 @@ impl Doc {
         // Deleting a last line without a line break of its own also removes the break before it;
         // a file's final line break stays.
         let no_eol = end > 0 && self.rope.char(end - 1) != '\n';
-        let start = if end == self.rope.len_chars() && no_eol && a > 0 && b + 1 >= self.visible_lines() {
+        let start = if end == self.rope.len_chars() && no_eol && a > 0 && b + 1 >= self.content_lines() {
             self.line_end(a - 1)
         } else {
             start
@@ -659,7 +666,7 @@ impl Doc {
     /// Alt+Shift+Up/Down: moves the current line(s) past the neighbouring line.
     pub fn move_lines(&mut self, down: bool) {
         let (a, b) = self.line_span();
-        let last = self.visible_lines() - 1;
+        let last = self.content_lines() - 1;
         if (down && b >= last) || (!down && a == 0) {
             return;
         }
@@ -816,6 +823,22 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_end_lands_on_the_drawn_line_after_a_final_break() {
+        let mut d = doc("a\nb\n", 0);
+        d.doc_end(false);
+        assert_eq!(d.line(), 2);
+        assert!(d.line() < d.visible_lines());
+        d.vertical(-1, false);
+        assert_eq!(d.line(), 1);
+        d.vertical(1, false);
+        assert_eq!(d.line(), 2);
+        // Moving the last content line down doesn't swallow the final line break.
+        let mut d = doc("a\nb\n", 2);
+        d.move_lines(true);
+        assert_eq!(text(&d), "a\nb\n");
+    }
+
+    #[test]
     fn typing_groups_into_one_undo_step() {
         let mut d = doc("", 0);
         for c in "hello".chars() {
@@ -946,7 +969,7 @@ mod tests {
         let mut d = doc("1\n3\n", 2);
         d.delete_lines();
         assert_eq!(text(&d), "1\n");
-        assert_eq!(d.line(), 0);
+        assert_eq!(d.line(), 1); // the empty line after the final break, as in IntelliJ
         let mut d = doc("1\r\n3\r\n", 3);
         d.delete_lines();
         assert_eq!(text(&d), "1\r\n");

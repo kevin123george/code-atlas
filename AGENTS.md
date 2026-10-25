@@ -87,7 +87,9 @@ None yet. Later: `cargo install --path .` on the Mac and the laptop.
 - Terminals without the kitty protocol can't send Ctrl+Shift+letter, Ctrl+/ arrives as Ctrl+7 or Ctrl+_,
   Ctrl+Backspace as Ctrl+H. macOS Terminal.app lacks the protocol.
 - Shift+F3 (find previous) doesn't work without the kitty protocol: legacy terminals send `ESC[1;2R`, which
-  crossterm 0.28 (`parse.rs`) reads as a cursor-position report and drops. Needs a fallback key.
+  crossterm 0.28 (`parse.rs`) reads as a cursor-position report and drops. Fallback: **Alt+P**.
+- A final line break opens one more (empty) line that is drawn and reachable (as in IntelliJ):
+  `Doc::visible_lines()` counts it; line moves/deletes use the private `content_lines()` so the final break stays.
 - tmux `send-keys -l 'x;'`: a trailing `;` is a tmux command separator and is lost; send it as `'\;'`
   (the e2e `typ` helper does this).
 - Shift+Shift ("search everywhere") needs key *release* events (kitty `REPORT_EVENT_TYPES`); plan a fallback.
@@ -113,6 +115,6 @@ Recent Files, `catlas <dir>`. Not done yet: recent files aren't saved across run
 and the tree don't watch the disk (new files show after re-expanding a folder / a restart), no sidebar resizing.
 E2E suite `tests/e2e/` added 2026-10-25 (QA, 31 scenarios). Fixed: Ctrl+Y on the last line dropped the
 file's final line break; a quote or bracket typed over a selection replaced it instead of wrapping when a
-letter/quote was next to it. Open: Ctrl+End (and Right at the end of the last line) puts the cursor on the
-hidden empty line after a final line break ("Ln 3" on a `~` row in a 2-line file; scenario
-`ctrl_end_last_line`); Shift+F3 needs a non-kitty fallback (`find_prev_shift_f3`). Both fail on purpose.
+letter/quote was next to it. Then (same day) the empty line after a final line break is
+drawn and reachable like in IntelliJ (fixes Ctrl+End landing on a hidden line), and Alt+P finds the previous
+match where Shift+F3 can't arrive. Suite: 31/31 pass.

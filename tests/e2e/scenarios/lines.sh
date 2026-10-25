@@ -88,7 +88,7 @@ t_ctrl_end_last_line() {
     printf 'a\nb\n' > e.txt
     start 100 12 e.txt
     key Down Down
-    status "Ln 2, Col 2 "                    # Down stops at the end of the last drawn line
+    status "Ln 3, Col 1 "                    # as in IntelliJ: the line after a final break is drawn and reachable
     key C-Home C-End
-    status "Ln 2, Col 2 "
+    status "Ln 3, Col 1 "
 }

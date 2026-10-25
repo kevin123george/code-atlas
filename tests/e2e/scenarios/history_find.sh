@@ -49,22 +49,23 @@ t_goto_line() {
     wait_for "Go to line[:column]: "
     typ "3:2"; key Enter
     status "Ln 3, Col 2 "
-    key C-g; typ "99"; key Enter             # past the end: last line
-    status "Ln 5, Col 1 "
+    key C-g; typ "99"; key Enter             # past the end: last line (the empty one after the final break)
+    status "Ln 6, Col 1 "
     key C-g; typ "2:99"; key Enter           # past the line end: end of line
     status "Ln 2, Col 6 "
     key C-g; typ "x"; key Enter
     wait_for "Type a line number"
 }
 
-# Shift+F3 (find previous). Terminals without the kitty protocol (tmux, Terminal.app) send it as
-# ESC[1;2R, which crossterm 0.28 reads as a cursor-position report and drops: expected to fail in tmux.
+# Find previous. Terminals without the kitty protocol (tmux, Terminal.app) send Shift+F3 as ESC[1;2R,
+# which crossterm 0.28 reads as a cursor-position report and drops, so Alt+P is the fallback.
+# (Shift+F3 itself is covered by the kitty-bytes scenario.)
 t_find_prev_shift_f3() {
     printf 'foo bar\nfoo baz\nfoo qux\n' > f.txt
     start 100 12 f.txt
     key C-f; typ "foo"; key Enter
     status "Ln 1, Col 4 (3 chars)"
-    key S-F3; status "Ln 3, Col 4 (3 chars)"
+    key M-p; status "Ln 3, Col 4 (3 chars)"
 }
 
 # Keys tmux can't send (it turns Ctrl+Shift+Z into Ctrl+Z, Shift+F3 into ESC[1;2R): inject the bytes

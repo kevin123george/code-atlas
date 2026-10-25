@@ -167,6 +167,14 @@ impl App {
                 let input = d.selected_text().filter(|s| !s.contains('\n')).unwrap_or_else(|| self.last_find.clone());
                 self.prompt = Some(Prompt { kind: PromptKind::Find, input });
             }
+            // Shift+F3 is lost in terminals without the kitty protocol (crossterm reads it as a
+            // cursor report), so Alt+P also finds the previous match.
+            KeyCode::Char('p') if alt && !ctrl => {
+                let q = self.last_find.clone();
+                if !self.docs[self.active].find(&q, true) {
+                    self.message = Some(format!("Not found: {q}"));
+                }
+            }
             KeyCode::F(3) => {
                 let q = self.last_find.clone();
                 if !self.docs[self.active].find(&q, shift) {
@@ -246,7 +254,7 @@ impl App {
                         if !self.doc_mut().find(&input, false) {
                             self.message = Some(format!("Not found: {input}"));
                         } else {
-                            self.message = Some("F3 next · Shift+F3 previous".into());
+                            self.message = Some("F3 next · Shift+F3 or Alt+P previous".into());
                         }
                     }
                     PromptKind::GotoLine => {
