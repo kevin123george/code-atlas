@@ -1,0 +1,215 @@
+# Built-in languages and language servers of Code Atlas (compiled into catlas).
+# Override any of it in ~/.config/code-atlas/languages.toml or <project>/.code-atlas/languages.toml
+# (same format; see docs/languages.example.toml). Later files win field by field.
+#
+# [language.<name>]          one of the languages catlas has a grammar for (catlas --health lists them)
+#   extensions = [...]       file extensions, whole file names ("Dockerfile") or simple globs ("Dockerfile.*")
+#   roots = [...]            files that mark the project root, nearest first (else .git, else the file's folder)
+#   servers = [...]          [language-server.*] names to try in order; the first one found is the main server
+#                            (one that fails to start is skipped, then the next one is tried)
+#   also = [...]             extra servers that run next to the main one (their diagnostics are shown too)
+#
+# [language-server.<name>]
+#   command, args            the program (looked up on PATH plus ~/.cargo/bin, ~/.local/bin, ~/.bun/bin,
+#                            /opt/homebrew/bin, /usr/local/bin) and its arguments
+#   initialization-options   sent in `initialize`
+#   settings                 answers to the server's workspace/configuration requests ("yaml", "python.analysis" ...)
+#   version-args             how catlas --health asks for the version (default ["--version"])
+#   Strings in initialization-options and settings may use ${root}, ${home} and ${server-node-modules}.
+
+[language.rust]
+extensions = ["rs"]
+roots = ["Cargo.toml"]
+servers = ["rust-analyzer"]
+
+[language.typescript]
+extensions = ["ts", "mts", "cts"]
+roots = ["tsconfig.json", "jsconfig.json", "package.json"]
+servers = ["typescript-language-server", "typescript-native"]
+
+[language.tsx]
+extensions = ["tsx"]
+roots = ["tsconfig.json", "jsconfig.json", "package.json"]
+servers = ["typescript-language-server", "typescript-native"]
+
+[language.javascript]
+extensions = ["js", "mjs", "cjs", "jsx"]
+roots = ["jsconfig.json", "tsconfig.json", "package.json"]
+servers = ["typescript-language-server", "typescript-native"]
+
+[language.java]
+extensions = ["java"]
+roots = ["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"]
+servers = ["jdtls"]
+
+[language.kotlin]
+extensions = ["kt", "kts"]
+roots = ["settings.gradle.kts", "settings.gradle", "build.gradle.kts", "build.gradle", "pom.xml"]
+servers = ["kotlin-language-server"]
+
+[language.python]
+extensions = ["py", "pyi", "pyw"]
+roots = ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "pyrightconfig.json"]
+servers = ["pyright", "basedpyright", "pylsp"]
+also = ["ruff"]
+
+[language.go]
+extensions = ["go"]
+roots = ["go.work", "go.mod"]
+servers = ["gopls"]
+
+[language.c]
+extensions = ["c", "h"]
+roots = ["compile_commands.json", "compile_flags.txt", ".clangd", "CMakeLists.txt", "Makefile"]
+servers = ["clangd"]
+
+[language.cpp]
+extensions = ["cpp", "cc", "cxx", "c++", "hpp", "hh", "hxx", "h++", "ipp", "tpp", "mm"]
+roots = ["compile_commands.json", "compile_flags.txt", ".clangd", "CMakeLists.txt", "Makefile"]
+servers = ["clangd"]
+
+[language.bash]
+extensions = ["sh", "bash", "zsh", "ksh", ".bashrc", ".bash_profile", ".profile", ".zshrc", ".zprofile", "PKGBUILD"]
+servers = ["bash-language-server"]
+
+[language.lua]
+extensions = ["lua"]
+roots = [".luarc.json", ".luarc.jsonc", "stylua.toml", ".stylua.toml"]
+servers = ["lua-language-server"]
+
+[language.json]
+extensions = ["json", "jsonc", "json5", ".prettierrc", ".eslintrc", "flake.lock"]
+servers = ["vscode-json-language-server"]
+
+[language.yaml]
+extensions = ["yaml", "yml"]
+servers = ["yaml-language-server"]
+
+[language.toml]
+extensions = ["toml", "Cargo.lock", "Pipfile"]
+servers = ["taplo"]
+
+[language.html]
+extensions = ["html", "htm", "xhtml"]
+roots = ["package.json"]
+servers = ["vscode-html-language-server"]
+
+[language.css]
+extensions = ["css", "scss", "less"]
+roots = ["package.json"]
+servers = ["vscode-css-language-server"]
+
+[language.markdown]
+extensions = ["md", "markdown"]
+servers = ["marksman"]
+
+[language.dockerfile]
+extensions = ["dockerfile", "containerfile", "Dockerfile", "Containerfile", "Dockerfile.*", "Containerfile.*", "*.Dockerfile"]
+servers = ["docker-langserver"]
+
+[language.sql]
+extensions = ["sql"]
+servers = []
+
+# ---- servers ------------------------------------------------------------------------------------
+
+[language-server.rust-analyzer]
+command = "rust-analyzer"
+
+[language-server.typescript-language-server]
+command = "typescript-language-server"
+args = ["--stdio"]
+# Functions complete with their parentheses and argument placeholders.
+# A project's own node_modules/typescript wins; else the global one next to the server (npm i -g typescript).
+initialization-options = { preferences = { includeCompletionsWithSnippetText = true, completeFunctionCalls = true }, tsserver = { fallbackPath = "${server-node-modules}/typescript/lib" } }
+
+# TypeScript 7's own server (Go). Used when typescript-language-server can't start, which it can't
+# with only TypeScript 7 around (it needs the JavaScript tsserver of TypeScript 6 or older).
+[language-server.typescript-native]
+command = "tsc"
+args = ["--lsp", "--stdio"]
+
+[language-server.jdtls]
+command = "jdtls"
+# The brew wrapper keeps its workspace in $TMPDIR/jdtls-<hash of the project folder>.
+version-args = []
+
+[language-server.kotlin-language-server]
+command = "kotlin-language-server"
+version-args = []
+
+[language-server.pyright]
+command = "pyright-langserver"
+args = ["--stdio"]
+settings = { python = { analysis = { autoSearchPaths = true, useLibraryCodeForTypes = true, diagnosticMode = "openFilesOnly" } } }
+version-args = []
+
+[language-server.basedpyright]
+command = "basedpyright-langserver"
+args = ["--stdio"]
+settings = { basedpyright = { analysis = { diagnosticMode = "openFilesOnly" } } }
+version-args = []
+
+[language-server.pylsp]
+command = "pylsp"
+
+[language-server.ruff]
+command = "ruff"
+args = ["server"]
+
+[language-server.gopls]
+command = "gopls"
+version-args = ["version"]
+initialization-options = { usePlaceholders = true, completeUnimported = true }
+
+[language-server.clangd]
+command = "clangd"
+args = ["--header-insertion=never"]
+
+[language-server.bash-language-server]
+command = "bash-language-server"
+args = ["start"]
+
+[language-server.lua-language-server]
+command = "lua-language-server"
+
+[language-server.vscode-json-language-server]
+command = "vscode-json-language-server"
+args = ["--stdio"]
+# Lets the server fetch "$schema" URLs itself (the client has no vscode/content handler).
+initialization-options = { provideFormatter = true, handledSchemaProtocols = ["file", "http", "https"] }
+settings = { json = { validate = { enable = true }, format = { enable = true } } }
+version-args = []
+
+[language-server.yaml-language-server]
+command = "yaml-language-server"
+args = ["--stdio"]
+settings = { yaml = { validate = true, hover = true, completion = true, format = { enable = true }, schemaStore = { enable = true } } }
+version-args = []
+
+[language-server.taplo]
+command = "taplo"
+args = ["lsp", "stdio"]
+
+[language-server.vscode-html-language-server]
+command = "vscode-html-language-server"
+args = ["--stdio"]
+initialization-options = { provideFormatter = true }
+version-args = []
+
+[language-server.vscode-css-language-server]
+command = "vscode-css-language-server"
+args = ["--stdio"]
+initialization-options = { provideFormatter = true }
+settings = { css = { validate = true }, scss = { validate = true }, less = { validate = true } }
+version-args = []
+
+[language-server.marksman]
+command = "marksman"
+args = ["server"]
+version-args = []
+
+[language-server.docker-langserver]
+command = "docker-langserver"
+args = ["--stdio"]
+version-args = []

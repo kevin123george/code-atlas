@@ -80,12 +80,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     let status = Rect::new(area.x, area.bottom() - 1, area.width, 1);
     let prompt_cursor = draw_status(buf, app, status);
-    if let (Some(p), Some(at), None) = (&app.lsp.popup, cursor, prompt_cursor) {
-        crate::lsp::popup::draw(f.buffer_mut(), p, at, area);
-    }
+    let lsp_cursor = app.draw_lsp_popups(f.buffer_mut(), cursor, prompt_cursor.is_some(), area);
     let popup_cursor = crate::project::ui::draw_popup(f.buffer_mut(), &mut app.project, area);
 
-    if let Some(p) = popup_cursor.or(prompt_cursor).or(dock_cursor).or(panel_cursor).or(cursor) {
+    if let Some(p) = popup_cursor.or(lsp_cursor).or(prompt_cursor).or(dock_cursor).or(panel_cursor).or(cursor) {
         f.set_cursor_position(p);
     }
 }
@@ -96,6 +94,7 @@ pub fn block_cursor(app: &App) -> bool {
         && app.project.popup.is_none()
         && !app.project.focus_tree
         && !app.dock.has_focus()
+        && !app.lsp.picker_open()
         && app.vim.as_ref().is_some_and(|v| v.cmdline().is_none() && v.mode != Mode::Insert)
 }
 

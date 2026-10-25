@@ -16,15 +16,46 @@ kitty keyboard protocol (Ghostty, kitty, WezTerm, iTerm2 with "CSI u" on): it is
 ## Stack
 Rust 2021 (Mac: `~/.cargo/bin`, not on PATH; laptop: pacman `rust`). `ratatui` 0.29 + `crossterm` 0.28 (screen,
 input), `ropey` (text buffer), `unicode-width`, `ignore` (ripgrep's gitignore-aware walker, project view),
-`tree-sitter` 0.27 + grammar crates (rust, typescript/tsx, javascript, java, python, json, toml-ng, md, bash; their
-bundled highlight queries) for highlighting, `lsp-types` 0.97 + `serde_json` with an own JSON-RPC client (LSP).
+`tree-sitter` 0.27 + grammar crates (rust, typescript/tsx, javascript, java, kotlin-sg, python, go, c, cpp, bash,
+lua, json, yaml, toml-ng, html, css, md, containerfile, sequel; their bundled highlight queries) for highlighting,
+`lsp-types` 0.97 + `serde_json` with an own JSON-RPC client (LSP), `toml` (`languages.toml`).
 `serde` + `serde_json` also for the agents panel (stream-json, `agents.json`); agents run the `claude` CLI.
 `portable-pty` 0.9 + `vt100` 0.15 (terminal pane; vt100 0.16 conflicts with ratatui's pinned `unicode-width`),
 `similar` (line diffs) and the `git` CLI (git).
-Language servers are found on PATH plus `~/.cargo/bin`, `~/.local/bin`, `~/.bun/bin`, `/opt/homebrew/bin`,
-`/usr/local/bin`: rust-analyzer (Mac: `rustup component add rust-analyzer rustfmt`, both added 2026-10-25),
-typescript-language-server, pyright-langserver / basedpyright-langserver / pylsp, jdtls. Missing ones are skipped
-with a status message.
+Language servers: which one runs for which language comes from `languages.toml` (see **Language servers** below);
+they're found on PATH plus `~/.cargo/bin`, `~/.local/bin`, `~/.bun/bin`, `/opt/homebrew/bin`, `/usr/local/bin`.
+Installed on the Mac (2026-10-25, decision 0007): `npm i -g typescript typescript-language-server pyright
+bash-language-server yaml-language-server vscode-langservers-extracted dockerfile-language-server-nodejs`
+(Homebrew node, global prefix `/opt/homebrew`), `brew install jdtls gopls lua-language-server shellcheck ruff`
+(jdtls pulled in brew's `openjdk`; the Mac also has JDK 17/21/23/24/25), `rustup component add rust-analyzer rustfmt`;
+clangd comes with the Xcode command line tools. Not installed: kotlin-language-server, marksman, taplo,
+basedpyright, pylsp. `catlas --health` shows what is found. Missing servers are skipped with a status message.
+
+## Language servers
+`catlas --health [dir]` lists per language: highlighting, the configured servers, which one is used, its path and
+version. Configuration = three layers, later ones win **field by field**: built-in `src/lsp/languages.toml`
+(compiled in), `~/.config/code-atlas/languages.toml` (or `$CATLAS_CONFIG_DIR`, `$XDG_CONFIG_HOME/code-atlas`), and
+`<project>/.code-atlas/languages.toml`. A commented example: `docs/languages.example.toml`.
+```toml
+[language.python]                 # a catlas grammar name (rust, typescript, tsx, javascript, java, kotlin,
+servers = ["pyright", "pylsp"]    # python, go, c, cpp, bash, lua, json, yaml, toml, html, css, markdown,
+also = ["ruff"]                   # dockerfile, sql). servers: tried in order, the first found (and starting)
+roots = ["pyproject.toml"]        # is the main one; also: extra servers next to it (diagnostics + quick fixes)
+extensions = ["py", "pyi"]        # extensions, file names ("Dockerfile") or globs ("Dockerfile.*")
+
+[language-server.pyright]
+command = "pyright-langserver"    # name on PATH, or a path (~/ ok)
+args = ["--stdio"]
+initialization-options = { }      # sent in initialize; merged deeply with the built-in one
+settings = { python = { analysis = { typeCheckingMode = "strict" } } }   # answers workspace/configuration
+version-args = []                 # how --health asks for a version; [] = from the install path only
+```
+Strings in `initialization-options`/`settings` may use `${root}`, `${home}`, `${server-node-modules}`. A broken file
+is ignored as a whole and shown as ERROR in `--health`. Built-in picks (decision 0007): TS/JS
+typescript-language-server, then TypeScript 7's own `tsc --lsp --stdio` (`typescript-native`); Python pyright →
+basedpyright → pylsp, plus ruff; Java jdtls; Kotlin kotlin-language-server; Go gopls; C/C++ clangd; Bash
+bash-language-server (uses shellcheck); Lua lua-language-server; JSON/HTML/CSS vscode-*-language-server; YAML
+yaml-language-server; TOML taplo; Markdown marksman; Dockerfile docker-langserver; SQL highlighting only.
 
 ## Layout
 - `src/main.rs` – terminal setup/restore, event loop.
@@ -46,13 +77,17 @@ with a status message.
 - `src/syntax/` – code smarts without a server (M3): `mod.rs` `Lang` (detection by name/extension/`#!`, status-bar
   name, comment token, LSP id), capture name → `Token`, per-doc `Syntax` (parser + tree, incremental reparse,
   visible-lines cache); `comment.rs` Ctrl+/ toggling. Colours: `ui::theme::token_style`.
-- `src/lsp/` – LSP client (M3): `mod.rs` `Lsp` state + `impl App` (sync, requests, responses, keys, diagnostics for
-  the screen); `server.rs` server table, project root, PATH lookup, process + threads, `CATLAS_LSP_LOG`;
-  `jsonrpc.rs` framing; `text.rs` UTF-16 positions, file URIs, applying `TextEdit`s, snippet stripping;
-  `popup.rs` completion / hover / quick-fix popups. Hooks elsewhere: `Doc.syntax`, `Doc::rev`/`edit_with`/
+- `src/lsp/` – LSP client (M3, extended by lsp-more): `mod.rs` `Lsp` state + `impl App` (sync to the main + `also`
+  servers, requests, responses, keys, pull + push diagnostics, snippet sessions, pickers, signature help, F2);
+  `config.rs` `languages.toml` layers, merging, file → language, server selection, `${var}` expansion;
+  `languages.toml` the built-in table; `health.rs` `catlas --health`; `server.rs` project root, PATH lookup,
+  process + threads, `CATLAS_LSP_LOG`; `jsonrpc.rs` framing; `text.rs` UTF-16 positions, file URIs, applying
+  `TextEdit`s; `snippet.rs` LSP snippet parser (tab stops); `popup.rs` completion / hover / quick-fix popups,
+  signature line, centred pickers (usages, structure, symbols, implementations, problems). Hooks elsewhere: `Doc.syntax`, `Doc::rev`/`edit_with`/
   `set_path`/`line_span` (pub), `App.lsp`, `smart_key`/`smart_after_key` in `App::handle`, `PromptKind::Rename`,
   `lsp_did_save` in `App::save`, Ctrl+/ in `App::key`, `app.lsp_tick()` in the main loop (30 ms poll, draws only
-  when something changed or every 250 ms), highlighting/diagnostics/popup/language in `ui.rs`.
+  when something changed or every 250 ms), highlighting/diagnostics/language and `app.draw_lsp_popups` in `ui.rs`,
+  `lsp::config::init(root)` in `App::new` (before files open: detection reads it), `--health` in `main.rs`.
 - `src/agents/` – agents panel (M6, right side, Alt+9): `mod.rs` `Agents` state, keys, mouse, persistence
   (`agents.json`), reload-on-change and the `impl App` glue (`agents_key`/`agents_mouse`/`agents_paste`/
   `agents_tick`, `file_context`); `run.rs` one run: state machine (Running → Done/Failed/Stopped), transcript
@@ -131,9 +166,17 @@ None yet. Later: `cargo install --path .` on the Mac and the laptop.
 ## Keys (code smarts)
 | Key | Does |
 |---|---|
-| Ctrl+/ (also arrives as Ctrl+7, Ctrl+_) | comment / uncomment the line or selected lines (`//` or `#`; JSON, Markdown have none) |
-| Ctrl+Space | completion; also opens by itself after `.` (and `::` in Rust). ↑↓ PgUp PgDn, Enter/Tab accept, Esc close, typing filters (fuzzy) |
-| Ctrl+B | go to definition (opens or switches the tab) · **Ctrl+Alt+←** back |
+| Ctrl+/ (also arrives as Ctrl+7, Ctrl+_) | comment / uncomment the line or selected lines (`//`, `#` or `--` for Lua/SQL; JSON, Markdown, HTML, CSS have none) |
+| Ctrl+Space | completion; also opens by itself after `.` (and `::` in Rust). ↑↓ PgUp PgDn, **Enter** inserts, **Tab** replaces the rest of the word, Esc close, typing filters (fuzzy). Functions come with `()` (cursor inside) or the server's snippet: its placeholders are selected one by one, **Tab / Shift+Tab** next / previous, the last Tab lands after it, Esc ends |
+| (typing `(` or `,`) | signature help above the line, current parameter in bold accent; follows typing, closes off the line or with Esc |
+| Ctrl+B | go to definition (opens or switches the tab; several → a list) · **Ctrl+Alt+←** back |
+| Ctrl+Alt+B | go to implementation(s) (one jumps, several → a list) |
+| Alt+F7 | find usages: list of `line text … file:line`, type to filter, Enter opens |
+| Ctrl+F12 | file structure (document symbols, nested), the symbol at the cursor preselected, type to filter |
+| Ctrl+Alt+Shift+N, **Alt+N** | go to symbol in the project (workspace symbols; starts with the word at the cursor, the server filters) |
+| F2 / Shift+F2 | next / previous error or warning in the file (wraps; infos when there are none), "3/7 message" in the status bar |
+| Alt+6 | the file's problems as a list (IDEA's Problems window) |
+| in the lists | ↑↓ PgUp PgDn, Ctrl+Home/End, typing filters, Backspace / Ctrl+Backspace / Ctrl+U, Enter or F4 open, Esc close |
 | **F1** | quick documentation (hover). IDEA's Ctrl+Q is quit here. ↑↓ scroll, Esc or any key closes |
 | Shift+F6 | rename symbol (prompt pre-filled with the word); files changed elsewhere open as unsaved tabs |
 | Ctrl+Alt+L | reformat file (server's formatter, e.g. rustfmt) |
@@ -232,9 +275,24 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
   when `~/.cargo/bin` isn't on PATH. rust-analyzer answers formatting with `null` when rustfmt is missing.
 - Positions to and from servers are UTF-16 (`lsp::text::{to_lsp, from_lsp}`); never send char columns.
 - Debug a server: `CATLAS_LSP_LOG=/tmp/lsp.log catlas file.rs` logs every message (first 2000 chars).
+- typescript-language-server needs the JavaScript `tsserver` of TypeScript ≤ 6: with only TypeScript 7 (the
+  global `npm i -g typescript` is 7.0.2, Go, no `lib/tsserver.js`) its `initialize` fails, catlas marks it dead
+  and starts the next server in the list, `tsc --lsp --stdio`. A project with its own TypeScript ≤ 6 in
+  `node_modules` gets typescript-language-server.
+- TypeScript 7's server **pulls** diagnostics (`textDocument/diagnostic`, LSP 3.17) instead of publishing them;
+  catlas pulls after open/change/save when a server has `diagnosticProvider`.
+- jdtls (brew) keeps its workspace in `$TMPDIR/jdtls-<hash of the folder>`; the first open of a Maven project
+  imports it (downloads into `~/.m2`, ~1 min on the Spring Boot backend), diagnostics come after that.
+- yaml-language-server fetches schemas from schemastore.org for known file names (`schemaStore.enable`, on by
+  default); `$schema` URLs in JSON are fetched by vscode-json-language-server. Turn off in your languages.toml.
+- jdtls sends filter texts like `apiHit() : void`; completion filters on the leading name only. `$` is part of
+  a word in JS/TS/Java/Kotlin, not in shell (`$TAR` completes `TARGET`).
+- vscode-json-language-server has no go to definition: catlas checks the server's capabilities first and says
+  "<server> has no go to definition" instead of sending the request.
+- tmux drops a trailing `;` of `send-keys -l` (see above): in manual LSP checks type `\;`.
 - rust-analyzer needs ~1–2 min to index this crate on the Mac before diagnostics/definitions come; cargo-check
   diagnostics come after a save (didSave).
-- Ctrl+Alt+L / Alt+Enter / F1 need "Option as Meta" on macOS terminals for the Alt part.
+- Ctrl+Alt+L / Alt+Enter / Alt+F7 / Alt+N / Alt+6 / Ctrl+Alt+B need "Option as Meta" on macOS terminals for the Alt part. Ctrl+Alt+Shift+N arrives as Ctrl+Alt+N without the kitty protocol (both open the symbol search).
 - Agents panel: `claude -p` can't ask for permissions, so in the default mode edits are refused (red `⏺` line +
   "N denied"); use Alt+M → acceptEdits for edits. `manual` reports itself as `default` in the init line.
 - Agents panel: never test the stream with a nested `claude` you don't need: `CATLAS_CLAUDE=fake.sh` (prints
@@ -253,6 +311,7 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 `docs/decisions/0004-code-smarts.md` – M3 choices: own query cursor + diff-based incremental parse, full-text sync, F1 hover, no snippets.
 `docs/decisions/0005-agents-panel.md` – M6 choices: one `claude -p` per turn + `--resume`, flags only from `claude --help` (never bypass), stop by process group, reload rules, `agents.json`, staff over SSH.
 `docs/decisions/0006-git-and-terminal.md` – M5 choices: bottom dock, PTY + vt100, git CLI + in-memory gutter diffs, commit rules (never push/force), leave keys.
+`docs/decisions/0007-more-language-servers.md` – languages.toml layers + merge rules, server per language, fallback on a failed start, `also` servers, snippets, pull diagnostics, new keys, what was installed.
 
 ## Current state (2026-10-25)
 M1 core editing done (tabs, undo/redo, selection, bracket pairing, smart Enter/Home, duplicate/delete/move line,
@@ -277,6 +336,20 @@ TypeScript/Python/Java servers untested here (none installed on the Mac; missing
 no e2e scenarios for M3 in `tests/e2e/` (QA's harness; needs a server, so they'd be slow), no signature help,
 find usages (Alt+F7), semantic tokens, inline Markdown, file create/rename ops in workspace edits, or completion
 item resolve (docs in the list).
+LSP extended 2026-10-25 (lsp-more, decision 0007): configurable servers (`languages.toml`, user + project
+layers), `catlas --health`, 20 highlighted languages (+ Go, C, C++, Kotlin, YAML, HTML, CSS, Lua, Dockerfile, SQL),
+signature help, find usages (Alt+F7), file structure (Ctrl+F12), workspace symbols (Ctrl+Alt+Shift+N / Alt+N),
+implementations (Ctrl+Alt+B), F2 / Shift+F2 + Alt+6 problems, snippet completion with Tab stops and `()` for
+functions, extra servers per language (ruff next to pyright: diagnostics + quick fixes), pull diagnostics, fallback
+to the next server when one fails to start. Verified in tmux on scratch copies under `$TMPDIR` (diagnostic,
+completion, Ctrl+B each): TypeScript (Cashflow Atlas `frontend/server.ts`, via `tsc --lsp`), Java (jdtls on the
+Spring Boot backend, + Ctrl+Alt+B, Alt+F7, Ctrl+F12, Alt+N), Python (pyright + ruff on Tech Shorts `app/calm.py`,
+ruff quick fix), Bash (deploy.sh, shellcheck), YAML and JSON (local schema), Go (gopls, snippet Tab stops,
+Ctrl+Alt+B); quick checks for C (clangd), Lua, Dockerfile, HTML. E2E `tests/e2e/scenarios/lsp.sh` uses a fake
+server (`tests/e2e/fake-lsp.pl`, Perl + JSON::PP). Not done yet: Kotlin/Markdown/TOML servers not installed or
+tried, mirrored snippet stops (`${1}` twice) aren't linked, quick fixes from `also` servers only (requests other
+than code actions go to the main server), no mouse in the pickers, semantic tokens, completion item resolve,
+user-defined languages without a built-in grammar.
 M6 agents panel done 2026-10-25 (see Keys (agents panel), decision 0005): runs `claude -p` stream-json in the
 project root with a live transcript, follow-ups via `--resume`, stop, several runs at once, permission mode and
 agent choosers read from `claude --help`, include file/selection, staff status from the laptop every 60 s,

@@ -74,6 +74,7 @@ pub struct App {
 impl App {
     pub fn new(paths: Vec<PathBuf>) -> anyhow::Result<Self> {
         let (root, paths, as_project) = crate::project::split_args(paths);
+        crate::lsp::config::init(Some(&root));
         let mut project = crate::project::Project::new(root, as_project);
         let mut docs = Vec::new();
         for p in &paths {

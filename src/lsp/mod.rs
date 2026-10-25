@@ -1,16 +1,24 @@
 //! LSP client: one server process per (language server, project root), started when a file of
-//! that language is open. Full-text sync (didOpen / didChange after a short pause in typing /
-//! didSave / didClose), diagnostics, completion, go to definition, hover, rename, format and
-//! quick fixes. JSON-RPC runs over stdio in background threads; [`App::lsp_tick`] handles what
-//! arrived, once per event-loop turn.
+//! that language is open; which servers comes from `languages.toml` ([`config`]). A file has a
+//! main server (all requests) and optionally extra ones (`also`: their diagnostics and quick fixes
+//! too). Full-text sync (didOpen / didChange after a short pause in typing / didSave / didClose),
+//! diagnostics, completion with snippets, signature help, go to definition / implementation,
+//! usages, file structure, workspace symbols, hover, rename, format and quick fixes. JSON-RPC runs
+//! over stdio in background threads; [`App::lsp_tick`] handles what arrived, once per loop turn.
 //!
-//! Keys (IntelliJ): Ctrl+Space complete (also after `.` and `::`), Ctrl+B go to definition,
-//! Ctrl+Alt+← back, F1 quick documentation (IDEA's Ctrl+Q is quit here), Shift+F6 rename,
-//! Ctrl+Alt+L reformat, Alt+Enter quick fixes.
+//! Keys (IntelliJ): Ctrl+Space complete (also after `.` and `::`; Tab / Shift+Tab walk a
+//! snippet's placeholders), Ctrl+B go to definition, Ctrl+Alt+B implementations, Ctrl+Alt+←
+//! back, Alt+F7 usages, Ctrl+F12 file structure, Ctrl+Alt+Shift+N (Alt+N) symbol in the
+//! workspace, F2 / Shift+F2 next / previous problem, Alt+6 the file's problems, F1 quick
+//! documentation (IDEA's Ctrl+Q is quit here), Shift+F6 rename, Ctrl+Alt+L reformat, Alt+Enter
+//! quick fixes; signature help opens by itself after `(` and `,`.
 
+pub mod config;
+pub mod health;
 pub mod jsonrpc;
 pub mod popup;
 pub mod server;
+pub mod snippet;
 pub mod text;
 
 use std::collections::{HashMap, HashSet};
@@ -29,7 +37,7 @@ use crate::app::{App, Prompt, PromptKind};
 use crate::doc::Doc;
 use crate::syntax::Lang;
 use jsonrpc::Incoming;
-use popup::{Item, Popup};
+use popup::{Item, PickItem, PickKind, Picker, Popup, Signature};
 use server::{Event, Pending, Server};
 use text::{apply_edits, from_lsp, path_to_uri, to_lsp, uri_to_path};
 
@@ -37,7 +45,8 @@ use text::{apply_edits, from_lsp, path_to_uri, to_lsp, uri_to_path};
 const CHANGE_DELAY: Duration = Duration::from_millis(150);
 
 struct OpenDoc {
-    server: usize,
+    /// Main server first, then the `also` ones.
+    servers: Vec<usize>,
     version: i32,
     sent_rev: u64,
     seen_rev: u64,
@@ -51,6 +60,16 @@ pub struct Diag {
     pub severity: u8,
     pub message: String,
     raw: Value,
+    server: usize,
+}
+
+/// Tab stops of an inserted snippet (absolute char offsets), walked with Tab / Shift+Tab.
+struct SnippetSession {
+    doc: usize,
+    stops: Vec<(usize, usize)>,
+    cur: usize,
+    /// Document length after the last step, to see edits.
+    len: usize,
 }
 
 pub struct Lsp {
@@ -68,6 +87,13 @@ pub struct Lsp {
     /// Work-done progress per token: (server, title, latest text).
     progress: HashMap<String, (String, String, String)>,
     back: Vec<(PathBuf, usize)>,
+    pub signature: Option<Signature>,
+    /// Revision the signature help was last asked for.
+    sig_rev: u64,
+    snippet: Option<SnippetSession>,
+    /// Code-action answers still expected (several servers may answer).
+    actions_waiting: usize,
+    seq: u64,
 }
 
 impl Default for Lsp {
@@ -86,6 +112,11 @@ impl Default for Lsp {
             popup: None,
             progress: HashMap::new(),
             back: Vec::new(),
+            signature: None,
+            sig_rev: 0,
+            snippet: None,
+            actions_waiting: 0,
+            seq: 0,
         }
     }
 }
@@ -118,12 +149,16 @@ impl Lsp {
         k
     }
 
+    pub fn picker_open(&self) -> bool {
+        matches!(self.popup, Some(Popup::Picker(_)))
+    }
+
     fn server(&mut self, id: usize) -> Option<&mut Server> {
         self.servers.iter_mut().find(|s| s.id == id)
     }
 }
 
-pub(crate) fn initialize_params(root: &Path) -> Value {
+pub(crate) fn initialize_params(root: &Path, init_options: &Value) -> Value {
     let uri = path_to_uri(root);
     let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "root".into());
     json!({
@@ -132,14 +167,27 @@ pub(crate) fn initialize_params(root: &Path) -> Value {
         "rootUri": uri,
         "rootPath": root.display().to_string(),
         "workspaceFolders": [{ "uri": uri, "name": name }],
+        "initializationOptions": if init_options.is_null() { json!({}) } else { init_options.clone() },
         "capabilities": {
             "general": { "positionEncodings": ["utf-16"] },
             "textDocument": {
                 "synchronization": { "didSave": true, "dynamicRegistration": false },
                 "completion": {
-                    "completionItem": { "snippetSupport": false, "documentationFormat": ["plaintext", "markdown"], "labelDetailsSupport": true },
+                    "completionItem": { "snippetSupport": true, "documentationFormat": ["plaintext", "markdown"], "labelDetailsSupport": true },
                     "contextSupport": true
                 },
+                "signatureHelp": {
+                    "signatureInformation": {
+                        "documentationFormat": ["plaintext", "markdown"],
+                        "parameterInformation": { "labelOffsetSupport": true },
+                        "activeParameterSupport": true
+                    },
+                    "contextSupport": true
+                },
+                "references": {},
+                "implementation": { "linkSupport": true },
+                "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
+                "diagnostic": { "dynamicRegistration": false, "relatedDocumentSupport": false },
                 "hover": { "contentFormat": ["markdown", "plaintext"] },
                 "definition": { "linkSupport": true },
                 "rename": { "prepareSupport": false },
@@ -158,7 +206,9 @@ pub(crate) fn initialize_params(root: &Path) -> Value {
                 "applyEdit": true,
                 "workspaceEdit": { "documentChanges": true },
                 "configuration": true,
-                "workspaceFolders": true
+                "workspaceFolders": true,
+                "symbol": {},
+                "diagnostics": { "refreshSupport": true }
             },
             "window": { "workDoneProgress": true }
         }
@@ -169,9 +219,15 @@ fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '$'
 }
 
+/// Word characters of a language: `$` belongs to names in JS/TS/Java/Kotlin, but starts a
+/// variable in shell scripts (`$TARGET` completes `TARGET`).
+fn is_word_in(lang: Lang, c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || (c == '$' && matches!(lang, Lang::TypeScript | Lang::Tsx | Lang::JavaScript | Lang::Java | Lang::Kotlin))
+}
+
 fn word_start(d: &Doc) -> usize {
     let mut s = d.cursor;
-    while s > 0 && is_word(d.rope.char(s - 1)) {
+    while s > 0 && is_word_in(d.syntax.lang, d.rope.char(s - 1)) {
         s -= 1;
     }
     s
@@ -179,7 +235,7 @@ fn word_start(d: &Doc) -> usize {
 
 fn word_at(d: &Doc) -> String {
     let mut e = d.cursor;
-    while e < d.rope.len_chars() && is_word(d.rope.char(e)) {
+    while e < d.rope.len_chars() && is_word_in(d.syntax.lang, d.rope.char(e)) {
         e += 1;
     }
     d.rope.slice(word_start(d)..e).to_string()
@@ -209,7 +265,7 @@ impl App {
         for i in 0..self.docs.len() {
             let Some(path) = self.docs[i].path.clone() else { continue };
             let lang = self.docs[i].syntax.lang;
-            if server::specs(lang).is_empty() || self.lsp.no_server.contains(&lang) {
+            if !config::get().has_servers(lang.key()) || self.lsp.no_server.contains(&lang) {
                 continue;
             }
             let key = self.lsp.key(&path);
@@ -224,76 +280,156 @@ impl App {
                 if od.sent_rev != rev && (now == Some(i) || t - od.seen_at >= CHANGE_DELAY) {
                     od.version += 1;
                     od.sent_rev = rev;
-                    let (sid, version) = (od.server, od.version);
+                    let (sids, version) = (od.servers.clone(), od.version);
                     let text = self.docs[i].rope.to_string();
-                    if let Some(s) = self.lsp.server(sid) {
-                        s.notify("textDocument/didChange", json!({
-                            "textDocument": { "uri": uri, "version": version },
-                            "contentChanges": [{ "text": text }]
-                        }));
+                    for sid in sids {
+                        if let Some(s) = self.lsp.server(sid) {
+                            s.notify("textDocument/didChange", json!({
+                                "textDocument": { "uri": uri, "version": version },
+                                "contentChanges": [{ "text": text }]
+                            }));
+                        }
+                        self.pull_diags(sid, &key);
                     }
                 }
                 continue;
             }
-            let Some(sid) = self.server_for(lang, &key) else { continue };
-            let text = self.docs[i].rope.to_string();
-            if let Some(s) = self.lsp.server(sid) {
-                s.notify("textDocument/didOpen", json!({
-                    "textDocument": { "uri": uri, "languageId": lang.lsp_id(), "version": 1, "text": text }
-                }));
+            let sids = self.servers_for(lang, &key);
+            if sids.is_empty() {
+                continue;
             }
-            self.lsp.open.insert(key, OpenDoc { server: sid, version: 1, sent_rev: rev, seen_rev: rev, seen_at: t });
+            let text = self.docs[i].rope.to_string();
+            let lang_id = lang.lsp_id(Some(&key));
+            for &sid in &sids {
+                if let Some(s) = self.lsp.server(sid) {
+                    s.notify("textDocument/didOpen", json!({
+                        "textDocument": { "uri": uri, "languageId": lang_id, "version": 1, "text": text }
+                    }));
+                }
+            }
+            self.lsp.open.insert(key.clone(), OpenDoc { servers: sids.clone(), version: 1, sent_rev: rev, seen_rev: rev, seen_at: t });
+            for sid in sids {
+                self.pull_diags(sid, &key);
+            }
         }
         let gone: Vec<PathBuf> = self.lsp.open.keys().filter(|k| !live.contains(*k)).cloned().collect();
         for k in gone {
             let od = self.lsp.open.remove(&k).unwrap();
             self.lsp.diagnostics.remove(&k);
-            if let Some(s) = self.lsp.server(od.server) {
-                s.notify("textDocument/didClose", json!({ "textDocument": { "uri": path_to_uri(&k) } }));
+            for sid in od.servers {
+                if let Some(s) = self.lsp.server(sid) {
+                    s.notify("textDocument/didClose", json!({ "textDocument": { "uri": path_to_uri(&k) } }));
+                }
             }
         }
     }
 
-    /// The running server for a file, starting one if needed.
-    fn server_for(&mut self, lang: Lang, key: &Path) -> Option<usize> {
-        let specs = server::specs(lang);
-        let found = specs.iter().find_map(|s| server::which(s.cmd).map(|exe| (s, exe)));
-        let Some((spec, exe)) = found else {
+    /// The running servers for a file (main first), starting them if needed.
+    fn servers_for(&mut self, lang: Lang, key: &Path) -> Vec<usize> {
+        let cfg = config::get();
+        let roots = cfg.langs.get(lang.key()).map(|l| l.roots.clone()).unwrap_or_default();
+        let root = server::find_root(key, &roots);
+        // A server that failed here before is skipped, so the next one in the list gets a go.
+        let dead = &self.lsp.dead;
+        let sel = cfg.select(lang.key(), |s| if dead.contains(&(s.name.clone(), root.clone())) { None } else { server::which(&s.command) });
+        let main_missing = sel.main.is_none();
+        let picked: Vec<_> = sel.main.into_iter().chain(sel.also).collect();
+        if picked.is_empty() {
             self.lsp.no_server.insert(lang);
-            let names: Vec<&str> = specs.iter().map(|s| s.cmd).collect();
-            self.message = Some(format!("No language server for {} on PATH ({}): highlighting only", lang.name(), names.join(", ")));
-            return None;
-        };
-        let root = server::find_root(key, spec.markers);
-        if let Some(s) = self.lsp.servers.iter().find(|s| s.name == spec.cmd && s.root == root) {
-            return Some(s.id);
-        }
-        if self.lsp.dead.contains(&(spec.cmd.to_string(), root.clone())) {
-            return None;
-        }
-        let id = self.lsp.next_server;
-        self.lsp.next_server += 1;
-        match Server::start(id, &exe, spec, &root, self.lsp.tx.clone()) {
-            Ok(s) => {
-                self.lsp.progress.insert(format!("start-{id}"), (s.name.clone(), "starting".into(), String::new()));
-                self.lsp.servers.push(s);
-                Some(id)
+            if self.message.as_deref().is_none_or(|m| !m.starts_with("Couldn't")) {
+                self.message = Some(format!("No language server for {} on PATH ({}): highlighting only · catlas --health", lang.name(), sel.tried.join(", ")));
             }
-            Err(e) => {
-                self.lsp.dead.insert((spec.cmd.to_string(), root));
-                self.message = Some(format!("Couldn't start {}: {e}", spec.cmd));
-                None
+            return Vec::new();
+        }
+        if main_missing && self.message.as_deref().is_none_or(|m| !m.starts_with("Couldn't")) {
+            self.message = Some(format!("No main language server for {} ({}); running {} only", lang.name(), sel.tried.join(", "), picked[0].0.name));
+        }
+        let mut ids = Vec::new();
+        for (cfg, exe) in picked {
+            if let Some(s) = self.lsp.servers.iter().find(|s| s.name == cfg.name && s.root == root) {
+                ids.push(s.id);
+                continue;
+            }
+            let id = self.lsp.next_server;
+            self.lsp.next_server += 1;
+            match Server::start(id, &exe, &cfg, &root, self.lsp.tx.clone()) {
+                Ok(s) => {
+                    self.lsp.progress.insert(format!("start-{id}"), (s.name.clone(), "starting".into(), String::new()));
+                    self.lsp.servers.push(s);
+                    ids.push(id);
+                }
+                Err(e) => {
+                    self.lsp.dead.insert((cfg.name.clone(), root.clone()));
+                    self.message = Some(format!("Couldn't start {}: {e}", cfg.command));
+                }
             }
         }
+        ids
+    }
+
+    /// A server that refused to start: stop it, keep the error message.
+    fn on_exit_quiet(&mut self, id: usize) {
+        let msg = self.message.take();
+        self.on_exit(id);
+        self.message = msg;
+    }
+
+    /// Asks a pull-diagnostics server for a file's problems (no-op for push servers).
+    fn pull_diags(&mut self, sid: usize, key: &Path) {
+        let uri = path_to_uri(key);
+        if let Some(s) = self.lsp.server(sid).filter(|s| s.ready && s.pulls_diagnostics()) {
+            s.request("textDocument/diagnostic", json!({ "textDocument": { "uri": uri } }), Pending::PullDiags { path: key.to_path_buf() });
+        }
+    }
+
+    /// Pulls diagnostics for every open file of server `sid`.
+    fn pull_all(&mut self, sid: usize) {
+        let keys: Vec<PathBuf> = self.lsp.open.iter().filter(|(_, o)| o.servers.contains(&sid)).map(|(k, _)| k.clone()).collect();
+        for k in keys {
+            self.pull_diags(sid, &k);
+        }
+    }
+
+    /// New diagnostics of server `id` for `path` (pushed or pulled).
+    fn set_diags(&mut self, id: usize, path: PathBuf, list: Vec<Value>) {
+        let name = self.lsp.server(id).map(|s| s.name.clone()).unwrap_or_default();
+        let diags = list
+            .into_iter()
+            .filter_map(|raw| {
+                let d: lsp_types::Diagnostic = serde_json::from_value(raw.clone()).ok()?;
+                let severity = match d.severity {
+                    Some(lsp_types::DiagnosticSeverity::ERROR) | None => 1,
+                    Some(lsp_types::DiagnosticSeverity::WARNING) => 2,
+                    Some(lsp_types::DiagnosticSeverity::INFORMATION) => 3,
+                    _ => 4,
+                };
+                let message = match &d.source {
+                    Some(src) if src != &name && !d.message.contains(src.as_str()) => format!("{}  [{src}]", d.message),
+                    _ => d.message,
+                };
+                Some(Diag { start: d.range.start, end: d.range.end, severity, message, raw, server: id })
+            })
+            .collect::<Vec<_>>();
+        let all = self.lsp.diagnostics.entry(path).or_default();
+        all.retain(|g| g.server != id);
+        all.extend(diags);
+        all.sort_by_key(|g| (g.start.line, g.start.character));
     }
 
     fn on_exit(&mut self, id: usize) {
+        self.lsp.progress.remove(&format!("start-{id}"));
         let Some(i) = self.lsp.servers.iter().position(|s| s.id == id) else { return };
         let mut s = self.lsp.servers.remove(i);
         s.kill();
         let tail = s.stderr_tail.lock().unwrap().clone();
         self.lsp.dead.insert((s.name.clone(), s.root.clone()));
-        self.lsp.open.retain(|_, od| od.server != id);
+        for od in self.lsp.open.values_mut() {
+            od.servers.retain(|&s| s != id);
+        }
+        self.lsp.open.retain(|_, od| !od.servers.is_empty());
+        for v in self.lsp.diagnostics.values_mut() {
+            v.retain(|g| g.server != id);
+        }
         self.lsp.progress.retain(|_, p| p.0 != s.name);
         self.message = Some(format!("Couldn't keep {} running: {}", s.name, if tail.is_empty() { "it exited".into() } else { tail }));
     }
@@ -307,9 +443,16 @@ impl App {
                 match result {
                     Ok(v) => self.on_response(id, p, v),
                     Err(e) => {
+                        if let Pending::CodeActions = p {
+                            self.lsp.actions_waiting = self.lsp.actions_waiting.saturating_sub(1);
+                        }
                         if let Pending::Initialize = p {
                             self.message = Some(format!("Couldn't start {name}: {e}"));
-                        } else if !matches!(p, Pending::Ignore | Pending::Completion { .. }) && !e.contains("content modified") && !e.contains("cancel") {
+                            self.on_exit_quiet(id);
+                        } else if !matches!(p, Pending::Ignore | Pending::Completion { .. } | Pending::Signature { .. } | Pending::Symbols { .. } | Pending::CodeActions | Pending::PullDiags { .. })
+                            && !e.contains("content modified")
+                            && !e.contains("cancel")
+                        {
                             self.message = Some(format!("Couldn't ask {name}: {e}"));
                         }
                     }
@@ -318,8 +461,9 @@ impl App {
             Incoming::Request { id: rid, method, params } => {
                 let result = match method.as_str() {
                     "workspace/configuration" => {
-                        let n = params.get("items").and_then(Value::as_array).map_or(0, Vec::len);
-                        Value::Array(vec![Value::Null; n])
+                        let items = params.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+                        let cfg = self.lsp.server(id).map(|s| s.cfg.clone()).unwrap_or_default();
+                        Value::Array(items.iter().map(|it| cfg.section(it.get("section").and_then(Value::as_str))).collect())
                     }
                     "workspace/applyEdit" => {
                         let edit = params.get("edit").cloned().and_then(|e| serde_json::from_value::<WorkspaceEdit>(e).ok());
@@ -327,6 +471,10 @@ impl App {
                         json!({ "applied": n > 0 })
                     }
                     "workspace/workspaceFolders" => Value::Null,
+                    "workspace/diagnostic/refresh" => {
+                        self.pull_all(id);
+                        Value::Null
+                    }
                     _ => Value::Null,
                 };
                 if let Some(s) = self.lsp.server(id) {
@@ -343,20 +491,7 @@ impl App {
             "textDocument/publishDiagnostics" => {
                 let Some(path) = params.get("uri").and_then(Value::as_str).and_then(uri_to_path) else { return };
                 let list = params.get("diagnostics").and_then(Value::as_array).cloned().unwrap_or_default();
-                let diags = list
-                    .into_iter()
-                    .filter_map(|raw| {
-                        let d: lsp_types::Diagnostic = serde_json::from_value(raw.clone()).ok()?;
-                        let severity = match d.severity {
-                            Some(lsp_types::DiagnosticSeverity::ERROR) | None => 1,
-                            Some(lsp_types::DiagnosticSeverity::WARNING) => 2,
-                            Some(lsp_types::DiagnosticSeverity::INFORMATION) => 3,
-                            _ => 4,
-                        };
-                        Some(Diag { start: d.range.start, end: d.range.end, severity, message: d.message, raw })
-                    })
-                    .collect();
-                self.lsp.diagnostics.insert(path, diags);
+                self.set_diags(id, path, list);
             }
             "$/progress" => {
                 let token = params.get("token").map(|t| t.to_string()).unwrap_or_default();
@@ -400,8 +535,9 @@ impl App {
                     let key = format!("start-{sid}");
                     self.lsp.progress.remove(&key);
                 }
+                self.pull_all(sid);
             }
-            Pending::Completion { path, start } => {
+            Pending::Completion { path, start, req } => {
                 let here = self.doc().path.clone().map(|p| self.lsp.key(&p));
                 if here.as_ref() != Some(&path) {
                     return;
@@ -417,21 +553,98 @@ impl App {
                 };
                 let prefix = d.rope.slice(start..d.cursor).to_string();
                 let items: Vec<Item> = items.into_iter().map(Item::from_lsp).collect();
-                let popup = Popup::completion(items, start, incomplete, &prefix);
+                let popup = Popup::completion(items, start, incomplete, &prefix, req);
                 let empty = matches!(&popup, Popup::Completion { shown, .. } if shown.is_empty());
                 self.lsp.popup = if empty { None } else { Some(popup) };
             }
-            Pending::Definition => {
-                let loc = match serde_json::from_value::<Option<GotoDefinitionResponse>>(v).ok().flatten() {
-                    Some(GotoDefinitionResponse::Scalar(l)) => Some((l.uri, l.range.start)),
-                    Some(GotoDefinitionResponse::Array(a)) => a.into_iter().next().map(|l| (l.uri, l.range.start)),
-                    Some(GotoDefinitionResponse::Link(a)) => a.into_iter().next().map(|l| (l.target_uri, l.target_selection_range.start)),
-                    None => None,
+            Pending::Definition { what, word } => {
+                let locs: Vec<(String, Position)> = match serde_json::from_value::<Option<GotoDefinitionResponse>>(v).ok().flatten() {
+                    Some(GotoDefinitionResponse::Scalar(l)) => vec![(l.uri.to_string(), l.range.start)],
+                    Some(GotoDefinitionResponse::Array(a)) => a.into_iter().map(|l| (l.uri.to_string(), l.range.start)).collect(),
+                    Some(GotoDefinitionResponse::Link(a)) => a.into_iter().map(|l| (l.target_uri.to_string(), l.target_selection_range.start)).collect(),
+                    None => Vec::new(),
                 };
-                match loc.and_then(|(u, pos)| uri_to_path(u.as_str()).map(|p| (p, pos))) {
-                    Some((path, pos)) => self.jump_to(&path, pos),
-                    None => self.message = Some("No definition found here".into()),
+                let locs: Vec<(PathBuf, Position)> = locs.into_iter().filter_map(|(u, p)| uri_to_path(&u).map(|path| (path, p))).collect();
+                match locs.len() {
+                    0 => self.message = Some(format!("No {what} found here")),
+                    1 => self.jump_to(&locs[0].0, locs[0].1),
+                    n => {
+                        let items = self.location_items(locs);
+                        let title = if what == "definition" { format!("Choose declaration of {word}") } else { format!("Implementations of {word}") };
+                        self.lsp.popup = Some(Popup::Picker(Picker::new(PickKind::Locations, format!("{title} ({n})"), items)));
+                    }
                 }
+            }
+            Pending::References { word } => {
+                let locs = serde_json::from_value::<Option<Vec<lsp_types::Location>>>(v).ok().flatten().unwrap_or_default();
+                let locs: Vec<(PathBuf, Position)> = locs.into_iter().filter_map(|l| uri_to_path(l.uri.as_str()).map(|p| (p, l.range.start))).collect();
+                if locs.is_empty() {
+                    self.message = Some(format!("No usages of {word} found"));
+                } else {
+                    let n = locs.len();
+                    let items = self.location_items(locs);
+                    let files = items.iter().map(|i| &i.path).collect::<HashSet<_>>().len();
+                    self.lsp.popup = Some(Popup::Picker(Picker::new(PickKind::Usages, format!("Usages of {word} · {n} in {files} file(s)"), items)));
+                }
+            }
+            Pending::Structure { path } => {
+                let mut items = Vec::new();
+                for s in v.as_array().cloned().unwrap_or_default() {
+                    flatten_symbol(&s, &path, 0, &mut items);
+                }
+                if items.is_empty() {
+                    self.message = Some("No symbols in this file".into());
+                    return;
+                }
+                let here = (self.doc().path.clone().map(|p| self.lsp.key(&p)) == Some(path.clone())).then(|| to_lsp(&self.doc().rope, self.doc().cursor));
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let mut p = Picker::new(PickKind::Structure, format!("Structure of {name}"), items);
+                if let Some(c) = here {
+                    // The innermost symbol that starts before the cursor.
+                    p.sel = p.items.iter().enumerate().filter(|(_, it)| (it.pos.line, it.pos.character) <= (c.line, c.character)).max_by_key(|(_, it)| (it.pos.line, it.pos.character)).map_or(0, |(i, _)| i);
+                }
+                self.lsp.popup = Some(Popup::Picker(p));
+            }
+            Pending::Symbols { seq } => {
+                let root = self.project.root.clone();
+                let Some(Popup::Picker(p)) = &mut self.lsp.popup else { return };
+                if p.kind != PickKind::Symbols || p.seq != seq {
+                    return;
+                }
+                let mut items = Vec::new();
+                for s in v.as_array().cloned().unwrap_or_default() {
+                    let Some(path) = s.pointer("/location/uri").and_then(Value::as_str).and_then(uri_to_path) else { continue };
+                    let pos = s.pointer("/location/range/start").and_then(|p| serde_json::from_value(p.clone()).ok()).unwrap_or_default();
+                    let container = s.get("containerName").and_then(Value::as_str).unwrap_or("");
+                    let file = rel(&root, &path);
+                    let detail = if container.is_empty() { format!("{file}:{}", pos_line(pos)) } else { format!("{container} · {file}:{}", pos_line(pos)) };
+                    items.push(PickItem {
+                        kind: symbol_kind(s.get("kind").and_then(Value::as_u64).unwrap_or(0)),
+                        label: s.get("name").and_then(Value::as_str).unwrap_or("?").to_string(),
+                        detail,
+                        path,
+                        pos,
+                        depth: 0,
+                    });
+                }
+                items.truncate(500);
+                p.items = items;
+                p.sel = 0;
+                p.refilter();
+            }
+            Pending::PullDiags { path } => {
+                // "unchanged" reports keep what we have.
+                if v.get("kind").and_then(Value::as_str) == Some("full") {
+                    let items = v.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+                    self.set_diags(sid, path, items);
+                }
+            }
+            Pending::Signature { path, line } => {
+                let here = self.doc().path.clone().map(|p| self.lsp.key(&p));
+                if here.as_ref() != Some(&path) || self.doc().line() != line {
+                    return;
+                }
+                self.lsp.signature = serde_json::from_value::<Option<lsp_types::SignatureHelp>>(v).ok().flatten().and_then(|h| signature(h, line));
             }
             Pending::Hover => {
                 let text = match serde_json::from_value::<Option<Hover>>(v).ok().flatten().map(|h| h.contents) {
@@ -468,13 +681,22 @@ impl App {
                 }
             }
             Pending::CodeActions => {
-                let mut items: Vec<Value> = v.as_array().cloned().unwrap_or_default();
-                // Preferred fixes first, as IntelliJ shows them.
-                items.sort_by_key(|a| !a.get("isPreferred").and_then(Value::as_bool).unwrap_or(false));
-                if items.is_empty() {
+                self.lsp.actions_waiting = self.lsp.actions_waiting.saturating_sub(1);
+                let new: Vec<(usize, Value)> = v.as_array().cloned().unwrap_or_default().into_iter().map(|a| (sid, a)).collect();
+                let mut items = match self.lsp.popup.take() {
+                    Some(Popup::Actions { items, .. }) => items,
+                    other => {
+                        self.lsp.popup = other;
+                        Vec::new()
+                    }
+                };
+                items.extend(new);
+                // Preferred fixes first, as IntelliJ shows them (stable: main server's first).
+                items.sort_by_key(|(_, a)| !a.get("isPreferred").and_then(Value::as_bool).unwrap_or(false));
+                if !items.is_empty() {
+                    self.lsp.popup = Some(Popup::Actions { items, sel: 0 });
+                } else if self.lsp.actions_waiting == 0 && self.lsp.popup.is_none() {
                     self.message = Some("No quick fixes here".into());
-                } else {
-                    self.lsp.popup = Some(Popup::Actions { items, sel: 0, server: sid });
                 }
             }
             Pending::ResolveAction => self.run_action(sid, v, false),
@@ -488,7 +710,7 @@ impl App {
     fn active_server(&mut self) -> Option<(usize, String, PathBuf)> {
         let path = self.doc().path.clone()?;
         let lang = self.doc().syntax.lang;
-        if server::specs(lang).is_empty() {
+        if !config::get().has_servers(lang.key()) {
             self.message = Some(format!("No code smarts for {} files", lang.name()));
             return None;
         }
@@ -500,15 +722,46 @@ impl App {
             }
             return None;
         };
-        let sid = od.server;
+        let sid = od.servers[0];
         if self.lsp.server(sid).is_some_and(|s| !s.ready) {
             self.message = Some("Language server is still starting…".into());
         }
         Some((sid, path_to_uri(&key), key))
     }
 
+    /// False (with a message, except for automatic requests) when the started server says it
+    /// can't do `method`.
+    fn can(&mut self, sid: usize, method: &str) -> bool {
+        let (cap, what) = match method {
+            "textDocument/definition" => ("definitionProvider", "go to definition"),
+            "textDocument/implementation" => ("implementationProvider", "go to implementation"),
+            "textDocument/references" => ("referencesProvider", "find usages"),
+            "textDocument/hover" => ("hoverProvider", "quick documentation"),
+            "textDocument/rename" => ("renameProvider", "rename"),
+            "textDocument/formatting" => ("documentFormattingProvider", "reformat"),
+            "textDocument/documentSymbol" => ("documentSymbolProvider", "file structure"),
+            "workspace/symbol" => ("workspaceSymbolProvider", "symbol search"),
+            "textDocument/signatureHelp" => ("signatureHelpProvider", ""),
+            "textDocument/completion" => ("completionProvider", ""),
+            _ => return true,
+        };
+        let Some(s) = self.lsp.server(sid) else { return false };
+        if !s.ready {
+            return true;
+        }
+        let ok = s.caps.get(cap).is_some_and(|c| !c.is_null() && c != &json!(false));
+        if !ok && !what.is_empty() {
+            let name = s.name.clone();
+            self.message = Some(format!("{name} has no {what}"));
+        }
+        ok
+    }
+
     fn request_here(&mut self, method: &str, mut extra: Value, p: Pending) {
         let Some((sid, uri, _)) = self.active_server() else { return };
+        if !self.can(sid, method) {
+            return;
+        }
         let pos = to_lsp(&self.doc().rope, self.doc().cursor);
         let mut params = json!({ "textDocument": { "uri": uri }, "position": pos });
         if let (Some(o), Some(e)) = (params.as_object_mut(), extra.as_object_mut()) {
@@ -527,7 +780,8 @@ impl App {
             Some(c) => json!({ "context": { "triggerKind": 2, "triggerCharacter": c.to_string() } }),
             None => json!({ "context": { "triggerKind": 1 } }),
         };
-        self.request_here("textDocument/completion", ctx, Pending::Completion { path, start });
+        let req = to_lsp(&self.doc().rope, self.doc().cursor);
+        self.request_here("textDocument/completion", ctx, Pending::Completion { path, start, req });
     }
 
     pub fn lsp_rename(&mut self, new_name: String) {
@@ -539,6 +793,9 @@ impl App {
 
     fn request_format(&mut self) {
         let Some((sid, uri, key)) = self.active_server() else { return };
+        if !self.can(sid, "textDocument/formatting") {
+            return;
+        }
         let params = json!({ "textDocument": { "uri": uri }, "options": { "tabSize": crate::doc::TAB, "insertSpaces": true } });
         if let Some(s) = self.lsp.server(sid) {
             s.request("textDocument/formatting", params, Pending::Format { path: key });
@@ -551,15 +808,27 @@ impl App {
         let (s, e) = d.selection().unwrap_or((d.cursor, d.cursor));
         let range = Range::new(to_lsp(&d.rope, s), to_lsp(&d.rope, e));
         let line = d.line() as u32;
-        let diags: Vec<Value> = self
+        let diags: Vec<(usize, Value)> = self
             .lsp
             .diagnostics
             .get(&key)
-            .map(|v| v.iter().filter(|g| g.start.line <= line && g.end.line >= line).map(|g| g.raw.clone()).collect())
+            .map(|v| v.iter().filter(|g| g.start.line <= line && g.end.line >= line).map(|g| (g.server, g.raw.clone())).collect())
             .unwrap_or_default();
-        let params = json!({ "textDocument": { "uri": uri }, "range": range, "context": { "diagnostics": diags } });
-        if let Some(s) = self.lsp.server(sid) {
-            s.request("textDocument/codeAction", params, Pending::CodeActions);
+        let sids = self.lsp.open.get(&key).map(|o| o.servers.clone()).unwrap_or_else(|| vec![sid]);
+        self.lsp.actions_waiting = 0;
+        for sid in sids {
+            // Each server gets its own diagnostics back.
+            let mine: Vec<Value> = diags.iter().filter(|(s, _)| *s == sid).map(|(_, r)| r.clone()).collect();
+            let params = json!({ "textDocument": { "uri": uri }, "range": range, "context": { "diagnostics": mine } });
+            if let Some(s) = self.lsp.server(sid) {
+                if s.caps.get("codeActionProvider").is_some_and(|c| !c.is_null() && c != &json!(false)) || !s.ready {
+                    s.request("textDocument/codeAction", params, Pending::CodeActions);
+                    self.lsp.actions_waiting += 1;
+                }
+            }
+        }
+        if self.lsp.actions_waiting == 0 {
+            self.message = Some("No quick fixes here".into());
         }
     }
 
@@ -567,10 +836,11 @@ impl App {
         let Some(path) = self.doc().path.clone() else { return };
         self.lsp_sync(Some(self.active));
         let key = self.lsp.key(&path);
-        if let Some(sid) = self.lsp.open.get(&key).map(|o| o.server) {
+        for sid in self.lsp.open.get(&key).map(|o| o.servers.clone()).unwrap_or_default() {
             if let Some(s) = self.lsp.server(sid) {
                 s.notify("textDocument/didSave", json!({ "textDocument": { "uri": path_to_uri(&key) } }));
             }
+            self.pull_diags(sid, &key);
         }
     }
 
@@ -693,15 +963,333 @@ impl App {
         }
     }
 
-    fn accept_completion(&mut self) {
-        let Some(Popup::Completion { items, shown, sel, start, .. }) = self.lsp.popup.take() else { return };
+    /// Enter inserts (keeps what follows the cursor), Tab replaces the rest of the word, as in IDEA.
+    fn accept_completion(&mut self, replace: bool) {
+        let Some(Popup::Completion { items, shown, sel, start, req, .. }) = self.lsp.popup.take() else { return };
         let Some(&k) = shown.get(sel) else { return };
         let it = &items[k];
         let d = &mut self.docs[self.active];
         let from = it.edit_start.map(|p| from_lsp(&d.rope, p)).filter(|&s| s <= d.cursor).unwrap_or(start);
-        let mut edits = vec![TextEdit { range: Range::new(to_lsp(&d.rope, from), to_lsp(&d.rope, d.cursor)), new_text: it.insert.clone() }];
+        // Text after the cursor the server's range covers (a closing quote, the rest of a word).
+        let end = if replace { it.replace_end } else { it.edit_end };
+        let tail = end.filter(|e| e.line == req.line).map_or(0, |e| e.character.saturating_sub(req.character) as usize);
+        let line_end = d.line_end(d.line());
+        let to = (d.cursor + tail).min(line_end.max(d.cursor));
+        let mut snip = it.insert.clone();
+        let next = (d.cursor < d.rope.len_chars()).then(|| d.rope.char(d.cursor));
+        if it.auto_parens && next != Some('(') {
+            snip.text.push_str("()");
+            let n = snip.text.chars().count();
+            snip.stops = vec![snippet::Stop { index: 0, start: n - 1, end: n - 1 }];
+        }
+        // Extra edits (imports) above the word move it down.
+        let shift: isize = it
+            .extra
+            .iter()
+            .filter_map(|e| {
+                let (s, t) = (from_lsp(&d.rope, e.range.start), from_lsp(&d.rope, e.range.end));
+                (t <= from).then(|| e.new_text.chars().count() as isize - (t - s) as isize)
+            })
+            .sum();
+        let mut edits = vec![TextEdit { range: Range::new(to_lsp(&d.rope, from), to_lsp(&d.rope, to)), new_text: snip.text.clone() }];
         edits.extend(it.extra.iter().cloned());
         apply_edits(d, &edits);
+        let base = (from as isize + shift).max(0) as usize;
+        let stops: Vec<(usize, usize)> = snip.stops.iter().map(|s| (base + s.start, base + s.end)).collect();
+        match stops.last() {
+            Some(&(s, _)) => d.move_to(s, false),
+            None => d.move_to(base + snip.text.chars().count(), false),
+        }
+        self.lsp.snippet = None;
+        if stops.len() > 1 {
+            let len = d.rope.len_chars();
+            self.lsp.snippet = Some(SnippetSession { doc: self.active, stops, cur: 0, len });
+            self.snippet_select();
+        }
+        if snip.text.contains('(') {
+            self.request_signature(None);
+        }
+    }
+
+    // ---- snippets --------------------------------------------------------------------------
+
+    /// Selects the current tab stop's placeholder (or puts the cursor there).
+    fn snippet_select(&mut self) {
+        let Some(s) = &self.lsp.snippet else { return };
+        let (a, b) = s.stops[s.cur];
+        let d = &mut self.docs[s.doc];
+        d.move_to(a, false);
+        if b > a {
+            d.move_to(b, true);
+        }
+    }
+
+    /// Tab / Shift+Tab: next / previous stop; reaching the last one (`$0`) ends the session.
+    fn snippet_jump(&mut self, forward: bool) {
+        let Some(s) = &mut self.lsp.snippet else { return };
+        if forward {
+            s.cur += 1;
+        } else {
+            s.cur = s.cur.saturating_sub(1);
+        }
+        let last = s.cur + 1 >= s.stops.len();
+        self.snippet_select();
+        if last {
+            self.lsp.snippet = None;
+        }
+    }
+
+    /// After a key: moves the stops along with typing inside the current one; an edit anywhere
+    /// else ends the session.
+    fn snippet_track(&mut self) {
+        let Some(s) = &mut self.lsp.snippet else { return };
+        if s.doc != self.active || s.doc >= self.docs.len() {
+            self.lsp.snippet = None;
+            return;
+        }
+        let d = &self.docs[s.doc];
+        let len = d.rope.len_chars();
+        if len == s.len {
+            return;
+        }
+        let delta = len as isize - s.len as isize;
+        let (cs, ce) = s.stops[s.cur];
+        let new_ce = ce as isize + delta;
+        if new_ce < cs as isize || d.cursor < cs || d.cursor as isize > new_ce {
+            self.lsp.snippet = None;
+            return;
+        }
+        let mut out = Vec::new();
+        let mut cur = 0;
+        for (j, &(a, b)) in s.stops.iter().enumerate() {
+            if j == s.cur {
+                cur = out.len();
+                out.push((cs, new_ce as usize));
+            } else if a >= cs && b <= ce && a < ce {
+                // Nested in the placeholder that was typed over: gone.
+            } else if a >= ce {
+                out.push(((a as isize + delta) as usize, (b as isize + delta) as usize));
+            } else {
+                out.push((a, b));
+            }
+        }
+        s.stops = out;
+        s.cur = cur;
+        s.len = len;
+    }
+
+    // ---- navigation pickers ------------------------------------------------------------------
+
+    fn rel_path(&self, p: &Path) -> String {
+        rel(&self.project.root, p)
+    }
+
+    /// Picker rows for locations: the line's text, and `file:line`.
+    fn location_items(&mut self, mut locs: Vec<(PathBuf, Position)>) -> Vec<PickItem> {
+        locs.sort_by(|a, b| a.0.cmp(&b.0).then((a.1.line, a.1.character).cmp(&(b.1.line, b.1.character))));
+        locs.dedup();
+        let mut files: HashMap<PathBuf, Vec<String>> = HashMap::new();
+        let mut out = Vec::new();
+        for (path, pos) in locs.into_iter().take(1000) {
+            let text = match self.doc_index(&path) {
+                Some(i) => {
+                    let r = &self.docs[i].rope;
+                    if (pos.line as usize) < r.len_lines() { r.line(pos.line as usize).to_string() } else { String::new() }
+                }
+                None => {
+                    let lines = files.entry(path.clone()).or_insert_with(|| {
+                        std::fs::read_to_string(&path).map(|t| t.lines().map(str::to_string).collect()).unwrap_or_default()
+                    });
+                    lines.get(pos.line as usize).cloned().unwrap_or_default()
+                }
+            };
+            let label: String = text.trim().chars().take(160).collect();
+            let detail = format!("{}:{}", self.rel_path(&path), pos_line(pos));
+            out.push(PickItem { kind: "", label, detail, path, pos, depth: 0 });
+        }
+        out
+    }
+
+    fn request_structure(&mut self) {
+        let Some((sid, uri, key)) = self.active_server() else { return };
+        if !self.can(sid, "textDocument/documentSymbol") {
+            return;
+        }
+        if let Some(s) = self.lsp.server(sid) {
+            s.request("textDocument/documentSymbol", json!({ "textDocument": { "uri": uri } }), Pending::Structure { path: key });
+        }
+    }
+
+    fn open_symbols(&mut self) {
+        let Some((sid, _, _)) = self.active_server() else { return };
+        if !self.can(sid, "workspace/symbol") {
+            return;
+        }
+        let mut p = Picker::new(PickKind::Symbols, "Go to symbol in the project".into(), Vec::new());
+        p.server = sid;
+        p.query = word_at(self.doc());
+        self.lsp.popup = Some(Popup::Picker(p));
+        self.request_symbols();
+    }
+
+    fn request_symbols(&mut self) {
+        self.lsp.seq += 1;
+        let seq = self.lsp.seq;
+        let Some(Popup::Picker(p)) = &mut self.lsp.popup else { return };
+        p.seq = seq;
+        let (sid, query) = (p.server, p.query.clone());
+        if let Some(s) = self.lsp.server(sid) {
+            s.request("workspace/symbol", json!({ "query": query }), Pending::Symbols { seq });
+        }
+    }
+
+    /// Problems of the active file: (start char, severity, message), in file order.
+    fn problems(&mut self) -> Vec<(usize, u8, String, Position)> {
+        let Some(path) = self.doc().path.clone() else { return Vec::new() };
+        let key = self.lsp.key(&path);
+        let rope = &self.docs[self.active].rope;
+        let mut v: Vec<_> = self
+            .lsp
+            .diagnostics
+            .get(&key)
+            .map(|v| v.iter().filter(|g| g.severity < 4).map(|g| (from_lsp(rope, g.start), g.severity, g.message.clone(), g.start)).collect())
+            .unwrap_or_default();
+        v.sort_by_key(|p| p.0);
+        v
+    }
+
+    /// F2 / Shift+F2: the next / previous error or warning (infos when there are none), wrapping.
+    fn goto_problem(&mut self, forward: bool) {
+        let all = self.problems();
+        let worst = all.iter().map(|p| p.1).min().unwrap_or(4).max(2);
+        let list: Vec<_> = all.into_iter().filter(|p| p.1 <= worst).collect();
+        if list.is_empty() {
+            self.message = Some("No problems in this file".into());
+            return;
+        }
+        let c = self.doc().cursor;
+        let pick = if forward {
+            list.iter().find(|p| p.0 > c).or(list.first())
+        } else {
+            list.iter().rev().find(|p| p.0 < c).or(list.last())
+        };
+        if let Some(&(at, _, ref msg, _)) = pick {
+            let n = list.iter().position(|p| p.0 == at).unwrap_or(0) + 1;
+            let msg = format!("{n}/{} {}", list.len(), msg.lines().next().unwrap_or(""));
+            self.docs[self.active].move_to(at, false);
+            self.message = Some(msg);
+        }
+    }
+
+    fn open_problems(&mut self) {
+        let Some(path) = self.doc().path.clone() else { return };
+        let key = self.lsp.key(&path);
+        let items: Vec<PickItem> = self
+            .problems()
+            .into_iter()
+            .map(|(_, sev, msg, pos)| PickItem {
+                kind: match sev {
+                    1 => "err",
+                    2 => "warn",
+                    _ => "info",
+                },
+                label: msg.lines().next().unwrap_or("").to_string(),
+                detail: format!("Ln {}", pos_line(pos)),
+                path: key.clone(),
+                pos,
+                depth: 0,
+            })
+            .collect();
+        if items.is_empty() {
+            self.message = Some("No problems in this file".into());
+            return;
+        }
+        let n = items.len();
+        self.lsp.popup = Some(Popup::Picker(Picker::new(PickKind::Problems, format!("Problems in {} ({n})", self.doc().name()), items)));
+    }
+
+    /// Keys while a picker is open. Always handled.
+    fn picker_key(&mut self, k: KeyEvent) {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        let Some(Popup::Picker(p)) = &mut self.lsp.popup else { return };
+        let mut requery = false;
+        match k.code {
+            KeyCode::Esc => self.lsp.popup = None,
+            KeyCode::Up => p.sel = p.sel.checked_sub(1).unwrap_or(p.shown.len().saturating_sub(1)),
+            KeyCode::Down => p.sel = if p.sel + 1 >= p.shown.len() { 0 } else { p.sel + 1 },
+            KeyCode::PageUp => p.sel = p.sel.saturating_sub(10),
+            KeyCode::PageDown => p.sel = (p.sel + 10).min(p.shown.len().saturating_sub(1)),
+            KeyCode::Home if ctrl => p.sel = 0,
+            KeyCode::End if ctrl => p.sel = p.shown.len().saturating_sub(1),
+            KeyCode::Enter | KeyCode::F(4) => {
+                let target = p.selected().map(|it| (it.path.clone(), it.pos));
+                self.lsp.popup = None;
+                if let Some((path, pos)) = target {
+                    self.jump_to(&path, pos);
+                }
+            }
+            KeyCode::Backspace | KeyCode::Char('h') if ctrl || k.code == KeyCode::Backspace => {
+                if ctrl || alt {
+                    let t = p.query.trim_end_matches(|c: char| is_word(c)).len();
+                    p.query.truncate(if t == p.query.len() { p.query.trim_end().len().saturating_sub(1) } else { t });
+                } else {
+                    p.query.pop();
+                }
+                requery = true;
+            }
+            KeyCode::Char('u') if ctrl => {
+                p.query.clear();
+                requery = true;
+            }
+            KeyCode::Char(c) if !ctrl && !alt => {
+                p.query.push(c);
+                requery = true;
+            }
+            _ => {}
+        }
+        if requery {
+            if let Some(Popup::Picker(p)) = &mut self.lsp.popup {
+                if p.kind == PickKind::Symbols {
+                    self.request_symbols();
+                } else {
+                    p.sel = 0;
+                    p.refilter();
+                }
+            }
+        }
+    }
+
+    // ---- signature help ----------------------------------------------------------------------
+
+    fn request_signature(&mut self, trigger: Option<char>) {
+        let Some(path) = self.doc().path.clone() else { return };
+        let path = self.lsp.key(&path);
+        let line = self.doc().line();
+        self.lsp.sig_rev = self.doc().rev();
+        let ctx = match trigger {
+            Some(c) => json!({ "triggerKind": 2, "triggerCharacter": c.to_string(), "isRetrigger": self.lsp.signature.is_some() }),
+            None => json!({ "triggerKind": if self.lsp.signature.is_some() { 3 } else { 1 }, "isRetrigger": self.lsp.signature.is_some() }),
+        };
+        self.request_here("textDocument/signatureHelp", json!({ "context": ctx }), Pending::Signature { path, line });
+    }
+
+    /// The server's signature-help trigger characters (default `(` and `,`).
+    fn sig_triggers(&mut self) -> Vec<String> {
+        let Some(path) = self.doc().path.clone() else { return Vec::new() };
+        let key = self.lsp.key(&path);
+        let Some(sid) = self.lsp.open.get(&key).map(|o| o.servers[0]) else { return Vec::new() };
+        let Some(s) = self.lsp.server(sid) else { return Vec::new() };
+        let Some(p) = s.caps.get("signatureHelpProvider").filter(|p| p.is_object()) else { return Vec::new() };
+        let mut v: Vec<String> = ["triggerCharacters", "retriggerCharacters"]
+            .iter()
+            .flat_map(|k| p.get(*k).and_then(Value::as_array).cloned().unwrap_or_default())
+            .filter_map(|c| c.as_str().map(str::to_string))
+            .collect();
+        if v.is_empty() {
+            v = vec!["(".into(), ",".into()];
+        }
+        v
     }
 
     // ---- screen ----------------------------------------------------------------------------
@@ -749,6 +1337,10 @@ impl App {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
+        if matches!(self.lsp.popup, Some(Popup::Picker(_))) {
+            self.picker_key(k);
+            return true;
+        }
         if let Some(p) = &mut self.lsp.popup {
             let list = !matches!(p, Popup::Hover { .. });
             match k.code {
@@ -773,15 +1365,16 @@ impl App {
                     return true;
                 }
                 KeyCode::Enter | KeyCode::Tab if list && !alt => {
+                    let replace = k.code == KeyCode::Tab;
                     match self.lsp.popup.take() {
-                        Some(Popup::Actions { items, sel, server }) => {
-                            if let Some(a) = items.into_iter().nth(sel) {
+                        Some(Popup::Actions { items, sel }) => {
+                            if let Some((server, a)) = items.into_iter().nth(sel) {
                                 self.run_action(server, a, true);
                             }
                         }
                         other => {
                             self.lsp.popup = other;
-                            self.accept_completion();
+                            self.accept_completion(replace);
                         }
                     }
                     return true;
@@ -793,16 +1386,53 @@ impl App {
                 }
             }
         }
+        if k.code == KeyCode::Esc {
+            // Closes signature help and ends a snippet, then does what Esc always does (Vim!).
+            self.lsp.signature = None;
+            self.lsp.snippet = None;
+            return false;
+        }
+        if self.lsp.snippet.is_some() && !ctrl && !alt {
+            match k.code {
+                KeyCode::Tab if !shift => {
+                    self.snippet_jump(true);
+                    return true;
+                }
+                KeyCode::BackTab | KeyCode::Tab => {
+                    self.snippet_jump(false);
+                    return true;
+                }
+                _ => {}
+            }
+        }
         // Vim normal/visual mode keeps Ctrl+B (page up) and gets Vim's Ctrl+] for go to definition.
         let vim_cmd = self.vim.as_ref().is_some_and(|v| !matches!(v.mode, crate::vim::Mode::Insert));
+        let def = |word: String| Pending::Definition { what: "definition", word };
         match k.code {
             KeyCode::Char(' ') if ctrl => self.request_completion(None),
             KeyCode::Char(']') | KeyCode::Char('5') if ctrl && vim_cmd => {
-                self.request_here("textDocument/definition", json!({}), Pending::Definition)
+                let w = word_at(self.doc());
+                self.request_here("textDocument/definition", json!({}), def(w))
             }
-            KeyCode::Char('b') if ctrl && !alt && !vim_cmd => self.request_here("textDocument/definition", json!({}), Pending::Definition),
+            KeyCode::Char('b') | KeyCode::Char('B') if ctrl && alt => {
+                let word = word_at(self.doc());
+                self.request_here("textDocument/implementation", json!({}), Pending::Definition { what: "implementation", word })
+            }
+            KeyCode::Char('b') if ctrl && !alt && !vim_cmd => {
+                let w = word_at(self.doc());
+                self.request_here("textDocument/definition", json!({}), def(w))
+            }
             KeyCode::Left if ctrl && alt => self.go_back(),
             KeyCode::F(1) => self.request_here("textDocument/hover", json!({}), Pending::Hover),
+            KeyCode::F(2) if !ctrl && !alt => self.goto_problem(!shift),
+            KeyCode::F(7) if alt && !ctrl => {
+                let word = word_at(self.doc());
+                self.request_here("textDocument/references", json!({ "context": { "includeDeclaration": false } }), Pending::References { word })
+            }
+            KeyCode::F(12) if ctrl && !alt => self.request_structure(),
+            // Ctrl+Alt+Shift+N (IDEA "Symbol…"); Alt+N where the terminal can't send it.
+            KeyCode::Char('n') | KeyCode::Char('N') if alt && (ctrl || !shift) => self.open_symbols(),
+            KeyCode::Char('6') if alt && !ctrl => self.open_problems(),
             KeyCode::F(6) if shift => {
                 if self.active_server().is_some() {
                     let input = word_at(self.doc());
@@ -816,15 +1446,17 @@ impl App {
         true
     }
 
-    /// After a normal key: keep the completion list in step with typing, auto-complete after `.`/`::`.
+    /// After a normal key: keep the completion list in step with typing, auto-complete after
+    /// `.`/`::`, signature help after `(`/`,`, snippet stops following the typing.
     pub fn smart_after_key(&mut self, k: KeyEvent) {
+        self.snippet_track();
         let plain = !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         if let Some(Popup::Completion { start, prefix, incomplete, .. }) = &self.lsp.popup {
             let (start, incomplete) = (*start, *incomplete);
             let d = self.doc();
             let typed = (d.cursor >= start && d.rope.char_to_line(d.cursor) == d.rope.char_to_line(start))
                 .then(|| d.rope.slice(start..d.cursor).to_string())
-                .filter(|t| t.chars().all(is_word));
+                .filter(|t| t.chars().all(|c| is_word_in(d.syntax.lang, c)));
             match typed {
                 None => self.lsp.popup = None,
                 Some(t) if t != *prefix => {
@@ -842,21 +1474,203 @@ impl App {
             }
         }
         let typing = self.vim.as_ref().is_none_or(|v| matches!(v.mode, crate::vim::Mode::Insert));
-        if let (KeyCode::Char(c), true, true) = (k.code, plain, typing) {
-            let d = self.doc();
-            let prev = d.cursor.checked_sub(2).map(|p| d.rope.char(p));
-            let lang = d.syntax.lang;
-            let trigger = c == '.' || (c == ':' && prev == Some(':') && matches!(lang, Lang::Rust));
-            if trigger && self.lsp.popup.is_none() && !server::specs(lang).is_empty() && !self.lsp.no_server.contains(&lang) {
-                self.request_completion(Some(c));
+        let lang = self.doc().syntax.lang;
+        let smart = config::get().has_servers(lang.key()) && !self.lsp.no_server.contains(&lang);
+        // Signature help follows the cursor: closes off its line, refreshes after edits.
+        if let Some(sig) = &self.lsp.signature {
+            if sig.line != self.doc().line() || !typing {
+                self.lsp.signature = None;
             }
         }
+        let mut sig_asked = false;
+        if let (KeyCode::Char(c), true, true, true) = (k.code, plain, typing, smart) {
+            let d = self.doc();
+            let prev = d.cursor.checked_sub(2).map(|p| d.rope.char(p));
+            let trigger = c == '.' || (c == ':' && prev == Some(':') && matches!(lang, Lang::Rust));
+            if trigger && self.lsp.popup.is_none() {
+                self.request_completion(Some(c));
+            }
+            if self.sig_triggers().iter().any(|t| t.starts_with(c)) {
+                self.request_signature(Some(c));
+                sig_asked = true;
+            } else if c == ')' && self.lsp.signature.is_some() {
+                self.request_signature(None);
+                sig_asked = true;
+            }
+        }
+        if !sig_asked && self.lsp.signature.is_some() && self.doc().rev() != self.lsp.sig_rev {
+            self.request_signature(None);
+        }
     }
+
+    /// Draws signature help, the completion/hover/actions popup and pickers. Returns the cursor
+    /// position a picker wants (its filter line).
+    pub fn draw_lsp_popups(&self, buf: &mut ratatui::buffer::Buffer, cursor: Option<ratatui::layout::Position>, prompt: bool, screen: ratatui::layout::Rect) -> Option<ratatui::layout::Position> {
+        if let (Some(sig), Some(at), false) = (&self.lsp.signature, cursor, prompt) {
+            if !matches!(self.lsp.popup, Some(Popup::Picker(_))) {
+                popup::draw_signature(buf, sig, at, screen);
+            }
+        }
+        match &self.lsp.popup {
+            Some(Popup::Picker(p)) => Some(popup::draw_picker(buf, p, screen)),
+            Some(p) => {
+                if let (Some(at), false) = (cursor, prompt) {
+                    popup::draw(buf, p, at, screen);
+                }
+                None
+            }
+            None => None,
+        }
+    }
+}
+
+/// `p` relative to the project root when inside it.
+fn rel(root: &Path, p: &Path) -> String {
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    p.strip_prefix(&root).unwrap_or(p).display().to_string()
+}
+
+fn pos_line(p: Position) -> u32 {
+    p.line + 1
+}
+
+/// Short tag for an LSP `SymbolKind`.
+fn symbol_kind(k: u64) -> &'static str {
+    match k {
+        1 => "file",
+        2 => "mod",
+        3 => "ns",
+        4 => "pkg",
+        5 => "C",
+        6 => "me",
+        7 | 8 => "fd",
+        9 => "new",
+        10 => "E",
+        11 => "I",
+        12 => "fn",
+        13 => "v",
+        14 => "c",
+        22 => "e",
+        23 => "S",
+        24 => "ev",
+        25 => "op",
+        26 => "T",
+        20 => "key",
+        _ => "·",
+    }
+}
+
+/// DocumentSymbol (nested) or SymbolInformation (flat) → picker rows.
+fn flatten_symbol(s: &Value, path: &Path, depth: usize, out: &mut Vec<PickItem>) {
+    let name = s.get("name").and_then(Value::as_str).unwrap_or("?").to_string();
+    let kind = symbol_kind(s.get("kind").and_then(Value::as_u64).unwrap_or(0));
+    let start = s.pointer("/selectionRange/start").or_else(|| s.pointer("/location/range/start")).or_else(|| s.pointer("/range/start"));
+    let pos: Position = start.and_then(|p| serde_json::from_value(p.clone()).ok()).unwrap_or_default();
+    let detail = s.get("detail").and_then(Value::as_str).or_else(|| s.get("containerName").and_then(Value::as_str)).unwrap_or("");
+    let detail: String = detail.lines().next().unwrap_or("").chars().take(60).collect();
+    out.push(PickItem { kind, label: name, detail: if detail.is_empty() { format!("Ln {}", pos_line(pos)) } else { format!("{detail} · Ln {}", pos_line(pos)) }, path: path.to_path_buf(), pos, depth });
+    for c in s.get("children").and_then(Value::as_array).into_iter().flatten() {
+        flatten_symbol(c, path, depth + 1, out);
+    }
+}
+
+/// The active signature with its active parameter as a char range of the label.
+fn signature(h: lsp_types::SignatureHelp, line: usize) -> Option<Signature> {
+    let n = h.signatures.len();
+    let i = (h.active_signature.unwrap_or(0) as usize).min(n.checked_sub(1)?);
+    let sig = h.signatures.into_iter().nth(i)?;
+    let active_param = sig.active_parameter.or(h.active_parameter).unwrap_or(0) as usize;
+    let label = sig.label.replace('\n', " ");
+    let param = sig.parameters.as_ref().and_then(|ps| ps.get(active_param));
+    let active = param.and_then(|p| match &p.label {
+        lsp_types::ParameterLabel::LabelOffsets([a, b]) => {
+            // UTF-16 offsets → char offsets.
+            let mut u = 0usize;
+            let (mut ca, mut cb) = (None, None);
+            for (ci, ch) in label.chars().chain(std::iter::once(' ')).enumerate() {
+                if u >= *a as usize && ca.is_none() {
+                    ca = Some(ci);
+                }
+                if u >= *b as usize && cb.is_none() {
+                    cb = Some(ci);
+                }
+                u += ch.len_utf16();
+            }
+            Some((ca?, cb?))
+        }
+        lsp_types::ParameterLabel::Simple(name) => {
+            let open = label.find('(').unwrap_or(0);
+            let at = label[open..].find(name.as_str())? + open;
+            let s = label[..at].chars().count();
+            Some((s, s + name.chars().count()))
+        }
+    });
+    let doc_of = |d: &lsp_types::Documentation| match d {
+        lsp_types::Documentation::String(s) => s.clone(),
+        lsp_types::Documentation::MarkupContent(m) => m.value.clone(),
+    };
+    let doc = param
+        .and_then(|p| p.documentation.as_ref().map(doc_of))
+        .or_else(|| sig.documentation.as_ref().map(doc_of))
+        .unwrap_or_default();
+    let doc = doc.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with("```")).unwrap_or("").to_string();
+    Some(Signature { label, active, doc, line, more: n - 1 })
 }
 
 fn marked(s: MarkedString) -> String {
     match s {
         MarkedString::String(s) => s,
         MarkedString::LanguageString(l) => l.value,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signature_marks_the_active_parameter() {
+        let h: lsp_types::SignatureHelp = serde_json::from_value(json!({
+            "signatures": [{
+                "label": "fn add(a: i32, b: i32) -> i32",
+                "documentation": "Adds two numbers.",
+                "parameters": [{ "label": [7, 13] }, { "label": [15, 21] }]
+            }],
+            "activeParameter": 1
+        }))
+        .unwrap();
+        let s = signature(h, 3).unwrap();
+        assert_eq!(&s.label.chars().collect::<Vec<_>>()[s.active.unwrap().0..s.active.unwrap().1].iter().collect::<String>(), "b: i32");
+        assert_eq!((s.doc.as_str(), s.line, s.more), ("Adds two numbers.", 3, 0));
+        // String labels are looked up after the "(", so a parameter named like the function works.
+        let h: lsp_types::SignatureHelp = serde_json::from_value(json!({
+            "signatures": [{ "label": "x(x, y)", "parameters": [{ "label": "x" }, { "label": "y" }], "activeParameter": 0 },
+                           { "label": "x()" }],
+            "activeSignature": 0
+        }))
+        .unwrap();
+        let s = signature(h, 0).unwrap();
+        assert_eq!((s.active, s.more), (Some((2, 3)), 1));
+        let empty: lsp_types::SignatureHelp = serde_json::from_value(json!({ "signatures": [] })).unwrap();
+        assert!(signature(empty, 0).is_none());
+    }
+
+    #[test]
+    fn symbols_flatten_with_depth() {
+        let v = json!([{ "name": "App", "kind": 23, "range": {"start": {"line": 1, "character": 0}, "end": {"line": 9, "character": 1}},
+                         "selectionRange": {"start": {"line": 1, "character": 11}, "end": {"line": 1, "character": 14}},
+                         "children": [{ "name": "new", "kind": 6, "detail": "fn() -> App",
+                                        "range": {"start": {"line": 2, "character": 4}, "end": {"line": 3, "character": 5}},
+                                        "selectionRange": {"start": {"line": 2, "character": 11}, "end": {"line": 2, "character": 14}} }] },
+                       { "name": "flat", "kind": 12, "containerName": "m",
+                         "location": { "uri": "file:///x.rs", "range": {"start": {"line": 20, "character": 0}, "end": {"line": 20, "character": 1}} } }]);
+        let mut out = Vec::new();
+        for s in v.as_array().unwrap() {
+            flatten_symbol(s, Path::new("/x.rs"), 0, &mut out);
+        }
+        let rows: Vec<(&str, &str, usize, u32)> = out.iter().map(|i| (i.kind, i.label.as_str(), i.depth, i.pos.line)).collect();
+        assert_eq!(rows, [("S", "App", 0, 1), ("me", "new", 1, 2), ("fn", "flat", 0, 20)]);
+        assert_eq!(out[1].detail, "fn() -> App · Ln 3");
+        assert_eq!(out[2].detail, "m · Ln 21");
     }
 }

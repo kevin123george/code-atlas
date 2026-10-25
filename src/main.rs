@@ -33,6 +33,12 @@ fn main() -> Result<()> {
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!("catlas [--vim] [dir] [file ...]   open a project folder (default: the current one) and files in Code Atlas");
         println!("  --vim   start in Vim mode (also CATLAS_VIM=1; Ctrl+Alt+V toggles at runtime)");
+        println!("catlas --health [dir]   which languages have highlighting and which language servers are installed");
+        return Ok(());
+    }
+    if args.first().is_some_and(|a| a == "--health") {
+        let dir = args.get(1).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+        lsp::health::run(&dir);
         return Ok(());
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {

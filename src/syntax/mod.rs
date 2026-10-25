@@ -21,44 +21,67 @@ pub enum Lang {
     Tsx,
     JavaScript,
     Java,
+    Kotlin,
     Python,
-    Json,
-    Toml,
-    Markdown,
+    Go,
+    C,
+    Cpp,
     Bash,
+    Lua,
+    Json,
+    Yaml,
+    Toml,
+    Html,
+    Css,
+    Markdown,
+    Dockerfile,
+    Sql,
     Plain,
 }
 
 impl Lang {
-    /// By file name and extension, then by a `#!` line.
+    /// Every language with a grammar (all but `Plain`).
+    pub const ALL: [Lang; 20] = [
+        Lang::Rust, Lang::TypeScript, Lang::Tsx, Lang::JavaScript, Lang::Java, Lang::Kotlin, Lang::Python, Lang::Go,
+        Lang::C, Lang::Cpp, Lang::Bash, Lang::Lua, Lang::Json, Lang::Yaml, Lang::Toml, Lang::Html, Lang::Css,
+        Lang::Markdown, Lang::Dockerfile, Lang::Sql,
+    ];
+
+    /// The name in `languages.toml` (`[language.<key>]`).
+    pub fn key(self) -> &'static str {
+        match self {
+            Lang::Rust => "rust",
+            Lang::TypeScript => "typescript",
+            Lang::Tsx => "tsx",
+            Lang::JavaScript => "javascript",
+            Lang::Java => "java",
+            Lang::Kotlin => "kotlin",
+            Lang::Python => "python",
+            Lang::Go => "go",
+            Lang::C => "c",
+            Lang::Cpp => "cpp",
+            Lang::Bash => "bash",
+            Lang::Lua => "lua",
+            Lang::Json => "json",
+            Lang::Yaml => "yaml",
+            Lang::Toml => "toml",
+            Lang::Html => "html",
+            Lang::Css => "css",
+            Lang::Markdown => "markdown",
+            Lang::Dockerfile => "dockerfile",
+            Lang::Sql => "sql",
+            Lang::Plain => "text",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Lang> {
+        Lang::ALL.into_iter().find(|l| l.key() == key)
+    }
+
+    /// By file name and extension (`languages.toml`), then by a `#!` line.
     pub fn detect(path: Option<&Path>, first_line: &str) -> Lang {
-        if let Some(p) = path {
-            let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
-            let by_name = match name.as_str() {
-                "cargo.lock" | "pipfile" => Some(Lang::Toml),
-                ".bashrc" | ".bash_profile" | ".profile" | ".zshrc" | ".zprofile" | "pkgbuild" => Some(Lang::Bash),
-                _ => None,
-            };
-            if let Some(l) = by_name {
-                return l;
-            }
-            let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-            let by_ext = match ext.as_str() {
-                "rs" => Lang::Rust,
-                "ts" | "mts" | "cts" => Lang::TypeScript,
-                "tsx" => Lang::Tsx,
-                "js" | "mjs" | "cjs" | "jsx" => Lang::JavaScript,
-                "java" => Lang::Java,
-                "py" | "pyi" | "pyw" => Lang::Python,
-                "json" | "jsonc" | "json5" => Lang::Json,
-                "toml" => Lang::Toml,
-                "md" | "markdown" => Lang::Markdown,
-                "sh" | "bash" | "zsh" | "ksh" => Lang::Bash,
-                _ => Lang::Plain,
-            };
-            if by_ext != Lang::Plain {
-                return by_ext;
-            }
+        if let Some(l) = path.and_then(|p| crate::lsp::config::get().lang_for(p)).and_then(Lang::from_key) {
+            return l;
         }
         if let Some(rest) = first_line.strip_prefix("#!") {
             if rest.contains("python") {
@@ -69,6 +92,9 @@ impl Lang {
             }
             if rest.contains("node") || rest.contains("deno") || rest.contains("bun") {
                 return Lang::JavaScript;
+            }
+            if rest.contains("lua") {
+                return Lang::Lua;
             }
         }
         Lang::Plain
@@ -82,11 +108,21 @@ impl Lang {
             Lang::Tsx => "TSX",
             Lang::JavaScript => "JavaScript",
             Lang::Java => "Java",
+            Lang::Kotlin => "Kotlin",
             Lang::Python => "Python",
-            Lang::Json => "JSON",
-            Lang::Toml => "TOML",
-            Lang::Markdown => "Markdown",
+            Lang::Go => "Go",
+            Lang::C => "C",
+            Lang::Cpp => "C++",
             Lang::Bash => "Shell",
+            Lang::Lua => "Lua",
+            Lang::Json => "JSON",
+            Lang::Yaml => "YAML",
+            Lang::Toml => "TOML",
+            Lang::Html => "HTML",
+            Lang::Css => "CSS",
+            Lang::Markdown => "Markdown",
+            Lang::Dockerfile => "Dockerfile",
+            Lang::Sql => "SQL",
             Lang::Plain => "Text",
         }
     }
@@ -94,61 +130,96 @@ impl Lang {
     /// Token that starts a line comment, if the language has one.
     pub fn line_comment(self) -> Option<&'static str> {
         match self {
-            Lang::Rust | Lang::TypeScript | Lang::Tsx | Lang::JavaScript | Lang::Java => Some("//"),
-            Lang::Python | Lang::Toml | Lang::Bash => Some("#"),
-            Lang::Json | Lang::Markdown | Lang::Plain => None,
+            Lang::Rust | Lang::TypeScript | Lang::Tsx | Lang::JavaScript | Lang::Java | Lang::Kotlin | Lang::Go | Lang::C | Lang::Cpp => Some("//"),
+            Lang::Python | Lang::Toml | Lang::Bash | Lang::Yaml | Lang::Dockerfile => Some("#"),
+            Lang::Lua | Lang::Sql => Some("--"),
+            Lang::Json | Lang::Markdown | Lang::Html | Lang::Css | Lang::Plain => None,
         }
     }
 
-    /// The LSP `languageId`.
-    pub fn lsp_id(self) -> &'static str {
+    /// The LSP `languageId` (some depend on the extension: `.scss`, `.jsonc`).
+    pub fn lsp_id(self, path: Option<&Path>) -> &'static str {
+        let ext = path.and_then(|p| p.extension()).map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         match self {
             Lang::Rust => "rust",
             Lang::TypeScript => "typescript",
             Lang::Tsx => "typescriptreact",
+            Lang::JavaScript if ext == "jsx" => "javascriptreact",
             Lang::JavaScript => "javascript",
             Lang::Java => "java",
+            Lang::Kotlin => "kotlin",
             Lang::Python => "python",
-            Lang::Json => "json",
-            Lang::Toml => "toml",
-            Lang::Markdown => "markdown",
+            Lang::Go => "go",
+            Lang::C => "c",
+            Lang::Cpp if ext == "mm" => "objective-cpp",
+            Lang::Cpp => "cpp",
             Lang::Bash => "shellscript",
+            Lang::Lua => "lua",
+            Lang::Json if ext == "jsonc" => "jsonc",
+            Lang::Json => "json",
+            Lang::Yaml => "yaml",
+            Lang::Toml => "toml",
+            Lang::Html => "html",
+            Lang::Css if ext == "scss" => "scss",
+            Lang::Css if ext == "less" => "less",
+            Lang::Css => "css",
+            Lang::Markdown => "markdown",
+            Lang::Dockerfile => "dockerfile",
+            Lang::Sql => "sql",
             Lang::Plain => "plaintext",
         }
     }
 
+    /// Whether highlighting works for this language (its grammar and query load).
+    pub fn highlights(self) -> bool {
+        self.config().is_some()
+    }
+
     fn config(self) -> Option<&'static Config> {
-        static CONFIGS: [OnceLock<Option<Config>>; 10] = [const { OnceLock::new() }; 10];
-        let (i, lang, queries): (usize, Language, Vec<&str>) = match self {
-            Lang::Rust => (0, tree_sitter_rust::LANGUAGE.into(), vec![tree_sitter_rust::HIGHLIGHTS_QUERY]),
-            Lang::TypeScript => (
-                1,
-                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-                vec![tree_sitter_typescript::HIGHLIGHTS_QUERY, tree_sitter_javascript::HIGHLIGHT_QUERY],
-            ),
-            Lang::Tsx => (
-                2,
-                tree_sitter_typescript::LANGUAGE_TSX.into(),
-                vec![
-                    tree_sitter_typescript::HIGHLIGHTS_QUERY,
-                    tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
-                    tree_sitter_javascript::HIGHLIGHT_QUERY,
-                ],
-            ),
-            Lang::JavaScript => (
-                3,
-                tree_sitter_javascript::LANGUAGE.into(),
-                vec![tree_sitter_javascript::JSX_HIGHLIGHT_QUERY, tree_sitter_javascript::HIGHLIGHT_QUERY],
-            ),
-            Lang::Java => (4, tree_sitter_java::LANGUAGE.into(), vec![tree_sitter_java::HIGHLIGHTS_QUERY]),
-            Lang::Python => (5, tree_sitter_python::LANGUAGE.into(), vec![tree_sitter_python::HIGHLIGHTS_QUERY]),
-            Lang::Json => (6, tree_sitter_json::LANGUAGE.into(), vec![tree_sitter_json::HIGHLIGHTS_QUERY]),
-            Lang::Toml => (7, tree_sitter_toml_ng::LANGUAGE.into(), vec![tree_sitter_toml_ng::HIGHLIGHTS_QUERY]),
-            Lang::Markdown => (8, tree_sitter_md::LANGUAGE.into(), vec![tree_sitter_md::HIGHLIGHT_QUERY_BLOCK]),
-            Lang::Bash => (9, tree_sitter_bash::LANGUAGE.into(), vec![tree_sitter_bash::HIGHLIGHT_QUERY]),
-            Lang::Plain => return None,
-        };
-        CONFIGS[i].get_or_init(|| Config::new(lang, &queries)).as_ref()
+        static CONFIGS: [OnceLock<Option<Config>>; Lang::ALL.len()] = [const { OnceLock::new() }; Lang::ALL.len()];
+        let i = Lang::ALL.iter().position(|&l| l == self)?;
+        CONFIGS[i]
+            .get_or_init(|| {
+                let (lang, queries): (Language, Vec<&str>) = match self {
+                    Lang::Rust => (tree_sitter_rust::LANGUAGE.into(), vec![tree_sitter_rust::HIGHLIGHTS_QUERY]),
+                    Lang::TypeScript => (
+                        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+                        vec![tree_sitter_typescript::HIGHLIGHTS_QUERY, tree_sitter_javascript::HIGHLIGHT_QUERY],
+                    ),
+                    Lang::Tsx => (
+                        tree_sitter_typescript::LANGUAGE_TSX.into(),
+                        vec![
+                            tree_sitter_typescript::HIGHLIGHTS_QUERY,
+                            tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+                            tree_sitter_javascript::HIGHLIGHT_QUERY,
+                        ],
+                    ),
+                    Lang::JavaScript => (
+                        tree_sitter_javascript::LANGUAGE.into(),
+                        vec![tree_sitter_javascript::JSX_HIGHLIGHT_QUERY, tree_sitter_javascript::HIGHLIGHT_QUERY],
+                    ),
+                    Lang::Java => (tree_sitter_java::LANGUAGE.into(), vec![tree_sitter_java::HIGHLIGHTS_QUERY]),
+                    Lang::Kotlin => (tree_sitter_kotlin_sg::LANGUAGE.into(), vec![tree_sitter_kotlin_sg::HIGHLIGHTS_QUERY]),
+                    Lang::Python => (tree_sitter_python::LANGUAGE.into(), vec![tree_sitter_python::HIGHLIGHTS_QUERY]),
+                    Lang::Go => (tree_sitter_go::LANGUAGE.into(), vec![tree_sitter_go::HIGHLIGHTS_QUERY]),
+                    Lang::C => (tree_sitter_c::LANGUAGE.into(), vec![tree_sitter_c::HIGHLIGHT_QUERY]),
+                    // C++'s query only adds to C's (as in Helix and Neovim).
+                    Lang::Cpp => (tree_sitter_cpp::LANGUAGE.into(), vec![tree_sitter_cpp::HIGHLIGHT_QUERY, tree_sitter_c::HIGHLIGHT_QUERY]),
+                    Lang::Bash => (tree_sitter_bash::LANGUAGE.into(), vec![tree_sitter_bash::HIGHLIGHT_QUERY]),
+                    Lang::Lua => (tree_sitter_lua::LANGUAGE.into(), vec![tree_sitter_lua::HIGHLIGHTS_QUERY]),
+                    Lang::Json => (tree_sitter_json::LANGUAGE.into(), vec![tree_sitter_json::HIGHLIGHTS_QUERY]),
+                    Lang::Yaml => (tree_sitter_yaml::LANGUAGE.into(), vec![tree_sitter_yaml::HIGHLIGHTS_QUERY]),
+                    Lang::Toml => (tree_sitter_toml_ng::LANGUAGE.into(), vec![tree_sitter_toml_ng::HIGHLIGHTS_QUERY]),
+                    Lang::Html => (tree_sitter_html::LANGUAGE.into(), vec![tree_sitter_html::HIGHLIGHTS_QUERY]),
+                    Lang::Css => (tree_sitter_css::LANGUAGE.into(), vec![tree_sitter_css::HIGHLIGHTS_QUERY]),
+                    Lang::Markdown => (tree_sitter_md::LANGUAGE.into(), vec![tree_sitter_md::HIGHLIGHT_QUERY_BLOCK]),
+                    Lang::Dockerfile => (tree_sitter_containerfile::LANGUAGE.into(), vec![tree_sitter_containerfile::HIGHLIGHTS_QUERY]),
+                    Lang::Sql => (tree_sitter_sequel::LANGUAGE.into(), vec![tree_sitter_sequel::HIGHLIGHTS_QUERY]),
+                    Lang::Plain => return None,
+                };
+                Config::new(lang, &queries)
+            })
+            .as_ref()
     }
 }
 
@@ -432,7 +503,7 @@ mod tests {
 
     #[test]
     fn every_language_has_a_working_query() {
-        for l in [Lang::Rust, Lang::TypeScript, Lang::Tsx, Lang::JavaScript, Lang::Java, Lang::Python, Lang::Json, Lang::Toml, Lang::Markdown, Lang::Bash] {
+        for l in Lang::ALL {
             let c = l.config().unwrap_or_else(|| panic!("{l:?} has no config"));
             assert!(c.tokens.iter().any(|t| t.is_some()), "{l:?} maps no captures");
         }
@@ -467,6 +538,37 @@ mod tests {
         assert_eq!(tokens_of(Lang::Bash, "echo hi # c\n")[0][9], Some(Token::Comment));
         assert_eq!(tokens_of(Lang::Java, "class A {}\n")[0][0], Some(Token::Keyword));
         assert_eq!(tokens_of(Lang::Markdown, "# Title\n")[0][2], Some(Token::Heading));
+    }
+
+    #[test]
+    fn highlights_the_newer_languages() {
+        let at = |l: Lang, text: &str, col: usize| tokens_of(l, text)[0][col];
+        assert_eq!(at(Lang::Go, "func main() {} // c\n", 0), Some(Token::Keyword));
+        assert_eq!(at(Lang::Go, "func main() {} // c\n", 16), Some(Token::Comment));
+        assert_eq!(at(Lang::C, "int x = 1; // c\n", 8), Some(Token::Number));
+        assert_eq!(at(Lang::C, "#include <stdio.h>\n", 0), Some(Token::Keyword));
+        assert_eq!(at(Lang::Cpp, "class A { public: int x; };\n", 0), Some(Token::Keyword));
+        assert_eq!(at(Lang::Cpp, "int x = 1; // c\n", 13), Some(Token::Comment), "C rules apply to C++");
+        assert_eq!(at(Lang::Kotlin, "fun f(): Int = 1\n", 0), Some(Token::Keyword));
+        assert_eq!(at(Lang::Yaml, "name: \"x\" # c\n", 7), Some(Token::String));
+        assert_eq!(at(Lang::Yaml, "name: \"x\" # c\n", 11), Some(Token::Comment));
+        assert_eq!(at(Lang::Html, "<p class=\"a\">x</p>\n", 1), Some(Token::Tag));
+        assert_eq!(at(Lang::Css, "a { color: red; }\n", 4), Some(Token::Property));
+        assert_eq!(at(Lang::Lua, "local x = 'a' -- c\n", 0), Some(Token::Keyword));
+        assert_eq!(at(Lang::Lua, "local x = 'a' -- c\n", 15), Some(Token::Comment));
+        assert_eq!(at(Lang::Sql, "SELECT id FROM t; -- c\n", 0), Some(Token::Keyword));
+        assert_eq!(at(Lang::Dockerfile, "FROM alpine:3 # c\n", 0), Some(Token::Keyword));
+        assert_eq!(lang("Dockerfile"), Lang::Dockerfile);
+        assert_eq!(lang("main.go"), Lang::Go);
+        assert_eq!(lang("x.hpp"), Lang::Cpp);
+        assert_eq!(lang("build.gradle.kts"), Lang::Kotlin);
+        assert_eq!(lang("ci.yml"), Lang::Yaml);
+        assert_eq!(Lang::Lua.line_comment(), Some("--"));
+        assert_eq!(Lang::Css.lsp_id(Some(Path::new("a.scss"))), "scss");
+        assert_eq!(Lang::Json.lsp_id(Some(Path::new("tsconfig.jsonc"))), "jsonc");
+        for l in Lang::ALL {
+            assert_eq!(Lang::from_key(l.key()), Some(l));
+        }
     }
 
     #[test]

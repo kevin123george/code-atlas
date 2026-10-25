@@ -1,0 +1,60 @@
+# Code Atlas language configuration: copy to ~/.config/code-atlas/languages.toml (all projects) or
+# <project>/.code-atlas/languages.toml (one project). Only write what you change: these files are
+# merged over the built-in table (src/lsp/languages.toml) field by field, project over user over
+# built-in. `initialization-options` and `settings` merge deeply (key by key); lists and strings
+# are replaced. Check the result with `catlas --health` (in the project folder).
+
+# ---- Languages ---------------------------------------------------------------------------------
+# The name is one of catlas's grammars: rust typescript tsx javascript java kotlin python go c cpp
+# bash lua json yaml toml html css markdown dockerfile sql.
+
+[language.python]
+# Try basedpyright first, then pyright; ruff runs next to it (its diagnostics + quick fixes show too).
+servers = ["basedpyright", "pyright"]
+also = ["ruff"]
+# Files that mark the project root (the server's workspace), nearest first.
+roots = ["pyproject.toml", "setup.cfg", "requirements.txt"]
+
+[language.cpp]
+# Extensions, whole file names ("Dockerfile") or simple globs ("Dockerfile.*"). A later file wins a
+# clash, so this makes .h files C++ (built-in: C).
+extensions = ["cpp", "cc", "hpp", "h"]
+
+[language.yaml]
+# Kubernetes-style files named *.k8s
+extensions = ["yaml", "yml", "*.k8s"]
+
+# ---- Language servers -------------------------------------------------------------------------
+
+[language-server.basedpyright]
+# command: a name looked up on PATH (+ ~/.cargo/bin, ~/.local/bin, ~/.bun/bin, /opt/homebrew/bin,
+# /usr/local/bin) or a path (~/ works).
+command = "basedpyright-langserver"
+args = ["--stdio"]
+# Answers to the server's workspace/configuration requests, by section ("basedpyright.analysis").
+settings = { basedpyright = { analysis = { typeCheckingMode = "standard" } } }
+
+[language-server.yaml-language-server]
+# Don't fetch schemas from schemastore.org; map a local one instead.
+settings = { yaml = { schemaStore = { enable = false }, schemas = { "./schemas/service.json" = "deploy/*.yaml" } } }
+
+[language-server.typescript-language-server]
+# initialization-options are sent in `initialize`. Strings may use ${root}, ${home} and
+# ${server-node-modules} (the node_modules folder the server is installed in).
+initialization-options = { preferences = { importModuleSpecifierPreference = "relative" } }
+
+# A server of your own (any LSP server over stdio).
+[language-server.my-sql]
+command = "sqls"
+# How `catlas --health` asks for the version; [] = only from the install path (brew, npm).
+version-args = ["--version"]
+
+[language.sql]
+servers = ["my-sql"]
+
+# ---- Installing the default servers (macOS, what the Mac has; 2026-10-25) ---------------------
+#   npm i -g typescript typescript-language-server pyright bash-language-server yaml-language-server \
+#            vscode-langservers-extracted dockerfile-language-server-nodejs
+#   brew install jdtls gopls lua-language-server shellcheck ruff
+#   rustup component add rust-analyzer rustfmt      clangd: comes with the Xcode command line tools
+#   Not installed: kotlin-language-server, marksman, taplo, basedpyright, pylsp (brew/npm/pipx have them).

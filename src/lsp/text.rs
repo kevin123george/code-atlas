@@ -99,58 +99,6 @@ pub fn apply_edits(doc: &mut Doc, edits: &[TextEdit]) {
     });
 }
 
-/// Snippet syntax (`${1:name}`, `$0`, `\$`) → plain text.
-pub fn strip_snippet(s: &str) -> String {
-    let mut out = String::new();
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => {
-                if let Some(n) = chars.next() {
-                    out.push(n);
-                }
-            }
-            '$' if chars.peek().is_some_and(|n| n.is_ascii_digit()) => {
-                while chars.peek().is_some_and(|n| n.is_ascii_digit()) {
-                    chars.next();
-                }
-            }
-            '$' if chars.peek() == Some(&'{') => {
-                chars.next();
-                while chars.peek().is_some_and(|n| n.is_ascii_digit()) {
-                    chars.next();
-                }
-                if chars.peek() == Some(&':') {
-                    chars.next();
-                }
-                // Copy the placeholder text up to the matching brace (placeholders may nest).
-                let mut depth = 1;
-                let mut inner = String::new();
-                for n in chars.by_ref() {
-                    match n {
-                        '{' => depth += 1,
-                        '}' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                    inner.push(n);
-                }
-                // `${1|a,b|}` choices: take the first.
-                if let Some(choice) = inner.strip_prefix('|') {
-                    inner = choice.split([',', '|']).next().unwrap_or("").to_string();
-                }
-                out.push_str(&strip_snippet(&inner));
-            }
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,13 +135,5 @@ mod tests {
         assert_eq!(d.cursor, 21);
         assert!(d.undo());
         assert_eq!(d.rope.to_string(), "let a=1;\nlet b=a;\n");
-    }
-
-    #[test]
-    fn strips_snippets() {
-        assert_eq!(strip_snippet("foo(${1:a}, ${2:b})$0"), "foo(a, b)");
-        assert_eq!(strip_snippet("vec![$0]"), "vec![]");
-        assert_eq!(strip_snippet("${1|one,two|}"), "one");
-        assert_eq!(strip_snippet("cost \\$5"), "cost $5");
     }
 }

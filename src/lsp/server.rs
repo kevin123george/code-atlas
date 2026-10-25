@@ -11,49 +11,26 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use super::jsonrpc::{self, Incoming};
-use crate::syntax::Lang;
-
-pub struct Spec {
-    pub cmd: &'static str,
-    pub args: &'static [&'static str],
-    /// Files that mark a project root, nearest first.
-    pub markers: &'static [&'static str],
-}
-
-/// Servers to try for a language, in order of preference.
-pub fn specs(lang: Lang) -> &'static [Spec] {
-    const RUST: &[Spec] = &[Spec { cmd: "rust-analyzer", args: &[], markers: &["Cargo.toml"] }];
-    const TS: &[Spec] = &[Spec {
-        cmd: "typescript-language-server",
-        args: &["--stdio"],
-        markers: &["tsconfig.json", "jsconfig.json", "package.json"],
-    }];
-    const PY_MARKERS: &[&str] = &["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"];
-    const PY: &[Spec] = &[
-        Spec { cmd: "pyright-langserver", args: &["--stdio"], markers: PY_MARKERS },
-        Spec { cmd: "basedpyright-langserver", args: &["--stdio"], markers: PY_MARKERS },
-        Spec { cmd: "pylsp", args: &[], markers: PY_MARKERS },
-    ];
-    const JAVA: &[Spec] = &[Spec { cmd: "jdtls", args: &[], markers: &["pom.xml", "build.gradle", "build.gradle.kts"] }];
-    match lang {
-        Lang::Rust => RUST,
-        Lang::TypeScript | Lang::Tsx | Lang::JavaScript => TS,
-        Lang::Python => PY,
-        Lang::Java => JAVA,
-        _ => &[],
-    }
-}
+use super::config::ServerCfg;
 
 /// Walks up from the file for one of `markers`, then for `.git`; else the file's folder.
-pub fn find_root(file: &Path, markers: &[&str]) -> PathBuf {
+pub fn find_root(file: &Path, markers: &[String]) -> PathBuf {
     let start = file.parent().map(Path::to_path_buf).unwrap_or_default();
-    let has = |dir: &Path, names: &[&str]| names.iter().any(|m| dir.join(m).exists());
-    let up = |names: &[&str]| start.ancestors().find(|d| has(d, names)).map(Path::to_path_buf);
-    up(markers).or_else(|| up(&[".git"])).unwrap_or(start)
+    let has = |dir: &Path, names: &[String]| names.iter().any(|m| dir.join(m).exists());
+    let up = |names: &[String]| start.ancestors().find(|d| has(d, names)).map(Path::to_path_buf);
+    up(markers).or_else(|| up(&[".git".to_string()])).unwrap_or(start)
 }
 
 /// Finds `cmd` on PATH, plus the usual per-user tool folders (the Mac keeps ~/.cargo/bin off PATH).
+/// A command with a `/` is taken as a path (`~/` expanded).
 pub fn which(cmd: &str) -> Option<PathBuf> {
+    if cmd.contains('/') {
+        let p = match cmd.strip_prefix("~/") {
+            Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest),
+            None => PathBuf::from(cmd),
+        };
+        return p.is_file().then_some(p);
+    }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
     dirs.extend([home.join(".cargo/bin"), home.join(".local/bin"), home.join(".bun/bin"), PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")]);
@@ -78,8 +55,15 @@ fn log(f: &Option<std::fs::File>, dir: &str, bytes: &[u8]) {
 /// What a request was for, so its response can be handled.
 pub enum Pending {
     Initialize,
-    Completion { path: PathBuf, start: usize },
-    Definition,
+    Completion { path: PathBuf, start: usize, req: lsp_types::Position },
+    /// Definition or implementation (`what`), for the word at the cursor.
+    Definition { what: &'static str, word: String },
+    References { word: String },
+    Structure { path: PathBuf },
+    Symbols { seq: u64 },
+    Signature { path: PathBuf, line: usize },
+    /// Pull diagnostics (`textDocument/diagnostic`, LSP 3.17) for one file.
+    PullDiags { path: PathBuf },
     Hover,
     Rename,
     Format { path: PathBuf },
@@ -91,6 +75,7 @@ pub enum Pending {
 pub struct Server {
     pub id: usize,
     pub name: String,
+    pub cfg: ServerCfg,
     pub root: PathBuf,
     child: Child,
     out: Sender<Vec<u8>>,
@@ -107,14 +92,14 @@ pub struct Server {
 pub type Event = (usize, Option<Incoming>);
 
 impl Server {
-    pub fn start(id: usize, exe: &Path, spec: &Spec, root: &Path, events: Sender<Event>) -> std::io::Result<Server> {
+    pub fn start(id: usize, exe: &Path, cfg: &ServerCfg, root: &Path, events: Sender<Event>) -> std::io::Result<Server> {
         // Tools the server runs (cargo, rustfmt, node) usually sit next to it, even when that
         // folder isn't on PATH (the Mac's ~/.cargo/bin).
         let mut path: Vec<PathBuf> = exe.parent().map(Path::to_path_buf).into_iter().collect();
         path.extend(std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default());
         let mut child = Command::new(exe)
             .env("PATH", std::env::join_paths(path).unwrap_or_default())
-            .args(spec.args)
+            .args(&cfg.args)
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -156,10 +141,10 @@ impl Server {
                 }
             }
         });
-        let name = spec.cmd.to_string();
         let mut s = Server {
             id,
-            name,
+            name: cfg.name.clone(),
+            cfg: cfg.clone(),
             root: root.to_path_buf(),
             child,
             out,
@@ -170,7 +155,11 @@ impl Server {
             pending: HashMap::new(),
             stderr_tail,
         };
-        s.request_now("initialize", super::initialize_params(root), Pending::Initialize);
+        let vars = super::config::vars(exe, root);
+        s.cfg.init_options = super::config::expand(&cfg.init_options, &vars);
+        s.cfg.settings = super::config::expand(&cfg.settings, &vars);
+        let init = super::initialize_params(root, &s.cfg.init_options);
+        s.request_now("initialize", init, Pending::Initialize);
         Ok(s)
     }
 
@@ -201,6 +190,11 @@ impl Server {
     pub fn notify(&mut self, method: &str, params: Value) {
         let msg = jsonrpc::notification(method, params);
         if self.ready { self.send(&msg) } else { self.queued.push(msg) }
+    }
+
+    /// Whether the server wants diagnostics pulled (TypeScript 7 does, instead of pushing them).
+    pub fn pulls_diagnostics(&self) -> bool {
+        self.caps.get("diagnosticProvider").is_some_and(|d| !d.is_null())
     }
 
     pub fn reply(&self, id: Value, result: Value) {
@@ -240,19 +234,18 @@ mod tests {
         let file = tmp.join("crate/src/deep/x.rs");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::create_dir_all(tmp.join(".git")).unwrap();
-        assert_eq!(find_root(&file, &["Cargo.toml"]), tmp, "falls back to the .git folder");
+        let m = ["Cargo.toml".to_string()];
+        assert_eq!(find_root(&file, &m), tmp, "falls back to the .git folder");
         std::fs::write(tmp.join("crate/Cargo.toml"), "").unwrap();
-        assert_eq!(find_root(&file, &["Cargo.toml"]), tmp.join("crate"));
+        assert_eq!(find_root(&file, &m), tmp.join("crate"));
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
     #[test]
-    fn languages_have_servers() {
-        assert_eq!(specs(Lang::Rust)[0].cmd, "rust-analyzer");
-        assert_eq!(specs(Lang::Tsx)[0].cmd, "typescript-language-server");
-        assert!(specs(Lang::Python).iter().any(|s| s.cmd == "pylsp"));
-        assert!(specs(Lang::Toml).is_empty());
+    fn which_finds_commands_and_paths() {
         assert!(which("sh").is_some());
+        assert!(which("/bin/sh").is_some());
+        assert!(which("/bin/surely-not-here").is_none());
         assert!(which("surely-not-a-real-tool-xyz").is_none());
     }
 }
