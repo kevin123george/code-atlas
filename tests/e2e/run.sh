@@ -210,7 +210,10 @@ fi
 [ -x "$CATLAS" ] || { echo "no binary at $CATLAS"; exit 2; }
 [ -x "$TMUX_BIN" ] || { echo "tmux not found (set TMUX_BIN)"; exit 2; }
 
-cleanup_server() { tm kill-server >/dev/null 2>&1; }
+cleanup_server() {
+    tm kill-server >/dev/null 2>&1
+    rm -f -- "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SOCK"   # kill-server leaves the socket file
+}
 trap cleanup_server EXIT INT TERM
 mkdir -p "$OUT"
 
