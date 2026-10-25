@@ -438,6 +438,23 @@ impl Doc {
             self.move_h(self.cursor + 1, false);
             return;
         }
+        if let Some((s, e)) = self.selection() {
+            // A bracket or quote typed over a selection wraps it, whatever is around it.
+            let wrap = match c {
+                '(' => Some(')'),
+                '[' => Some(']'),
+                '{' => Some('}'),
+                '"' | '\'' => Some(c),
+                _ => None,
+            };
+            if let Some(close) = wrap {
+                self.begin(EditKind::Other);
+                self.rope.insert_char(e, close);
+                self.rope.insert_char(s, c);
+                self.select(s + 1, e + 1);
+                return;
+            }
+        }
         let close = match c {
             '(' => Some(')'),
             '[' => Some(']'),
@@ -446,14 +463,6 @@ impl Doc {
             _ => None,
         };
         let close = close.filter(|_| next.is_none_or(|n| n.is_whitespace() || ")]};,".contains(n)));
-        if let (Some(close), Some((s, e))) = (close, self.selection()) {
-            // Wrap the selection.
-            self.begin(EditKind::Other);
-            self.rope.insert_char(e, close);
-            self.rope.insert_char(s, c);
-            self.select(s + 1, e + 1);
-            return;
-        }
         self.begin(if c.is_whitespace() { EditKind::Other } else { EditKind::Typing });
         self.delete_selection();
         self.rope.insert_char(self.cursor, c);
@@ -632,8 +641,10 @@ impl Doc {
         let col = self.display_col(self.line(), self.col());
         let start = self.line_start(a);
         let end = if b + 1 < self.rope.len_lines() { self.line_start(b + 1) } else { self.rope.len_chars() };
-        // Deleting the last line also removes the line break before it.
-        let start = if end == self.rope.len_chars() && a > 0 && b + 1 >= self.visible_lines() {
+        // Deleting a last line without a line break of its own also removes the break before it;
+        // a file's final line break stays.
+        let no_eol = end > 0 && self.rope.char(end - 1) != '\n';
+        let start = if end == self.rope.len_chars() && no_eol && a > 0 && b + 1 >= self.visible_lines() {
             self.line_end(a - 1)
         } else {
             start
@@ -928,6 +939,36 @@ mod tests {
         assert_eq!(d.selection(), Some((0, 3)));
         assert!(d.find("Foo", false));
         assert_eq!(d.selection(), Some((0, 3)));
+    }
+
+    #[test]
+    fn deleting_the_last_line_keeps_the_final_line_break() {
+        let mut d = doc("1\n3\n", 2);
+        d.delete_lines();
+        assert_eq!(text(&d), "1\n");
+        assert_eq!(d.line(), 0);
+        let mut d = doc("1\r\n3\r\n", 3);
+        d.delete_lines();
+        assert_eq!(text(&d), "1\r\n");
+    }
+
+    #[test]
+    fn brackets_and_quotes_wrap_any_selection() {
+        // Selection "abc" inside "(abc) def": the quote must wrap, not replace.
+        let mut d = doc("(abc) def", 1);
+        d.select(1, 4);
+        d.type_char('"');
+        assert_eq!(text(&d), "(\"abc\") def");
+        assert_eq!(d.selected_text().as_deref(), Some("abc"));
+        // Selection inside a word ("xy" of "xyz"): next char is a letter.
+        let mut d = doc("xyz", 0);
+        d.select(0, 2);
+        d.type_char('[');
+        assert_eq!(text(&d), "[xy]z");
+        let mut d = doc("it", 0);
+        d.select(0, 2);
+        d.type_char('\'');
+        assert_eq!(text(&d), "'it'");
     }
 
     #[test]
