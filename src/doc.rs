@@ -129,6 +129,19 @@ impl Doc {
         self.rev
     }
 
+    /// Takes `text` as the file's new content (it changed on disk, e.g. an agent edited it):
+    /// one undo step, a new revision (so syntax and language servers see it), the cursor kept
+    /// where it can be, and the document counts as saved.
+    pub fn reload_text(&mut self, text: &str) {
+        self.begin(EditKind::Other);
+        self.rope = Rope::from_str(text);
+        self.cursor = self.cursor.min(self.rope.len_chars());
+        self.anchor = None;
+        self.crlf = text.contains("\r\n");
+        self.saved_rev = self.rev;
+        self.last_edit = EditKind::None;
+    }
+
     pub fn dirty(&self) -> bool {
         self.rev != self.saved_rev
     }

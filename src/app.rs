@@ -65,6 +65,8 @@ pub struct App {
     pub vim: Option<Vim>,
     /// Language servers, diagnostics and code-smarts popups (M3, `src/lsp/`).
     pub lsp: crate::lsp::Lsp,
+    /// Agents panel: Claude Code runs, staff (`src/agents/`).
+    pub agents: crate::agents::Agents,
 }
 
 impl App {
@@ -81,6 +83,7 @@ impl App {
         }
         project.focus_tree = as_project && paths.is_empty();
         Ok(App {
+            agents: crate::agents::Agents::new(project.root.clone()),
             project,
             docs,
             active: 0,
@@ -138,6 +141,9 @@ impl App {
                 if self.prompt.is_some() {
                     self.prompt_key(k);
                     self.after_ide(before);
+                } else if self.agents_key(k) {
+                    // Handled by the agents panel (src/agents/), before Vim and the editor.
+                    self.after_ide(before);
                 } else if self.project_key(k) {
                     // Handled by the project view (src/project/).
                     self.after_ide(before);
@@ -151,6 +157,9 @@ impl App {
                 self.follow = true;
             }
             Event::Paste(text) => {
+                if self.agents_paste(&text) {
+                    return;
+                }
                 if self.vim.as_mut().is_some_and(|v| v.paste(&text)) {
                     return;
                 }
@@ -166,7 +175,7 @@ impl App {
             }
             Event::Mouse(m) => {
                 let before = self.active;
-                if !self.project_mouse(m) {
+                if !self.agents_mouse(m) && !self.project_mouse(m) {
                     self.mouse(m);
                 }
                 self.after_ide(before);

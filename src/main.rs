@@ -1,6 +1,7 @@
 //! Code Atlas: a terminal code editor with IntelliJ-style keys.
 //! Usage: `catlas [--vim] [dir] [file ...]` (no folder given = the current folder is the project)
 
+mod agents;
 mod app;
 mod doc;
 mod project;
@@ -63,6 +64,7 @@ fn run(app: &mut app::App) -> Result<()> {
     let mut last_draw = Instant::now();
     while !app.quit {
         app.tick();
+        redraw |= app.agents_tick();
         if redraw || last_draw.elapsed() >= Duration::from_millis(250) {
             term.draw(|f| ui::draw(f, app))?;
             redraw = false;

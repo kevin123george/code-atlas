@@ -18,6 +18,7 @@ Rust 2021 (Mac: `~/.cargo/bin`, not on PATH; laptop: pacman `rust`). `ratatui` 0
 input), `ropey` (text buffer), `unicode-width`, `ignore` (ripgrep's gitignore-aware walker, project view),
 `tree-sitter` 0.27 + grammar crates (rust, typescript/tsx, javascript, java, python, json, toml-ng, md, bash; their
 bundled highlight queries) for highlighting, `lsp-types` 0.97 + `serde_json` with an own JSON-RPC client (LSP).
+`serde` + `serde_json` also for the agents panel (stream-json, `agents.json`); agents run the `claude` CLI.
 Planned: `portable-pty` + `vt100` (terminal pane), `git` CLI or `gix` (git).
 Language servers are found on PATH plus `~/.cargo/bin`, `~/.local/bin`, `~/.bun/bin`, `/opt/homebrew/bin`,
 `/usr/local/bin`: rust-analyzer (Mac: `rustup component add rust-analyzer rustfmt`, both added 2026-10-25),
@@ -51,6 +52,16 @@ with a status message.
   `set_path`/`line_span` (pub), `App.lsp`, `smart_key`/`smart_after_key` in `App::handle`, `PromptKind::Rename`,
   `lsp_did_save` in `App::save`, Ctrl+/ in `App::key`, `app.lsp_tick()` in the main loop (30 ms poll, draws only
   when something changed or every 250 ms), highlighting/diagnostics/popup/language in `ui.rs`.
+- `src/agents/` – agents panel (M6, right side, Alt+9): `mod.rs` `Agents` state, keys, mouse, persistence
+  (`agents.json`), reload-on-change and the `impl App` glue (`agents_key`/`agents_mouse`/`agents_paste`/
+  `agents_tick`, `file_context`); `run.rs` one run: state machine (Running → Done/Failed/Stopped), transcript
+  `Entry`s, `claude_args`, the child process (own process group, reader threads, SIGTERM → SIGKILL);
+  `stream.rs` stream-json line parser + one-line tool summaries; `transcript.rs` entries → wrapped styled lines;
+  `input.rs` multi-line prompt box; `staff.rs` `aa-staff.sh status` fetch + parse; `cli.rs` `claude --help`
+  probe (permission modes, `--agent`), agent types, finding `claude`; `ui.rs` the panel; `testdata/*.jsonl`
+  recorded real runs. Hooks elsewhere: `App.agents`, `agents_key` before `project_key` (so Vim never sees panel
+  keys), `agents_mouse`/`agents_paste` first in `App::handle`, `draw_panel` in `ui::draw` (takes the right
+  45 columns before the sidebar), `app.agents_tick()` in the main loop, `Doc::reload_text` in `doc.rs`.
 - `docs/ROADMAP.md` – milestones and who owns which files. `docs/decisions/` – project decisions.
 
 ## Run & test
@@ -122,6 +133,18 @@ and completion opens by itself only in insert mode. The language name sits befor
 - New features go in their own module (`src/<feature>/…`) with a small hook in `app.rs`/`ui.rs`, so parallel work
   doesn't collide.
 
+## Keys (agents panel)
+| Key | Does |
+|---|---|
+| Alt+9 | show + focus the agents panel; again hides it (focus elsewhere: focuses it) |
+| Esc | back to the editor (the panel stays) · Tab / Shift+Tab: prompt → run list → transcript |
+| in the prompt | Enter send (new agent, or a follow-up to the selected run) · **Alt+Enter**, Shift+Enter, Ctrl+J newline · Ctrl+U clear · ↑ on the first line goes to the list |
+| Alt+M / Alt+A / Alt+I | next permission mode (from `claude --help`, default = your settings) / agent type / include the current file + selected lines |
+| Ctrl+N | "+ New agent" · **Ctrl+C** stop the selected run · Del (in the list) remove a run from the list |
+| ↑↓ (list) | pick a run (its transcript shows) · ↑↓ PgUp PgDn Home End (transcript) scroll, End follows again |
+| Ctrl+Alt+Y | reload the current file from disk (asks once if it has unsaved edits) |
+| mouse | click a run / the prompt, wheel scrolls the transcript |
+
 ## Keys (Vim mode)
 Off by default. On with `catlas --vim`, `CATLAS_VIM=1`, or **Ctrl+Alt+V** at runtime (toggles; the status bar
 badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in normal/visual mode).
@@ -179,6 +202,14 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 - rust-analyzer needs ~1–2 min to index this crate on the Mac before diagnostics/definitions come; cargo-check
   diagnostics come after a save (didSave).
 - Ctrl+Alt+L / Alt+Enter / F1 need "Option as Meta" on macOS terminals for the Alt part.
+- Agents panel: `claude -p` can't ask for permissions, so in the default mode edits are refused (red `⏺` line +
+  "N denied"); use Alt+M → acceptEdits for edits. `manual` reports itself as `default` in the init line.
+- Agents panel: never test the stream with a nested `claude` you don't need: `CATLAS_CLAUDE=fake.sh` (prints
+  stream-json lines) and `CATLAS_STAFF_CMD='exit 1'` (unreachable) make free e2e runs; `CATLAS_CONFIG_DIR`
+  keeps test runs out of your real `~/.config/code-atlas/agents.json`.
+- `aa-staff.sh status` repeats every old stopped session (dozens of lines); the panel groups by name. Alt+9 / Alt+M
+  need "Option as Meta" on macOS terminals (else `ª`, `µ`).
+- On macOS `$TMPDIR` is under `/var`, a link to `/private/var`: compare paths via `project::canonical`.
 - System clipboard: copy goes out via pbcopy / wl-copy / xclip / OSC 52; paste from outside arrives as a
   bracketed paste (Cmd+V / Ctrl+Shift+V), Ctrl+V pastes the editor's own clipboard.
 
@@ -187,6 +218,7 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 `docs/decisions/0002-project-view.md` – M2 choices: args, ignore rules, own fuzzy scorer, smart-case find in files, fallback keys.
 `docs/decisions/0003-vim-mode.md` – M4 choices: who gets which key, undo groups, register, `:q` per tab, plain-text search.
 `docs/decisions/0004-code-smarts.md` – M3 choices: own query cursor + diff-based incremental parse, full-text sync, F1 hover, no snippets.
+`docs/decisions/0005-agents-panel.md` – M6 choices: one `claude -p` per turn + `--resume`, flags only from `claude --help` (never bypass), stop by process group, reload rules, `agents.json`, staff over SSH.
 
 ## Current state (2026-10-25)
 M1 core editing done (tabs, undo/redo, selection, bracket pairing, smart Enter/Home, duplicate/delete/move line,
@@ -211,3 +243,11 @@ TypeScript/Python/Java servers untested here (none installed on the Mac; missing
 no e2e scenarios for M3 in `tests/e2e/` (QA's harness; needs a server, so they'd be slow), no signature help,
 find usages (Alt+F7), semantic tokens, inline Markdown, file create/rename ops in workspace edits, or completion
 item resolve (docs in the list).
+M6 agents panel done 2026-10-25 (see Keys (agents panel), decision 0005): runs `claude -p` stream-json in the
+project root with a live transcript, follow-ups via `--resume`, stop, several runs at once, permission mode and
+agent choosers read from `claude --help`, include file/selection, staff status from the laptop every 60 s,
+reload of open files the agent changed (or "changed on disk" when they have unsaved edits), runs saved in
+`~/.config/code-atlas/agents.json`. Verified with three real runs in tmux (edit in acceptEdits, resumed
+follow-up editing a dirty file, stop) and free fake-CLI runs. Not done yet: answering permission prompts from the
+panel (`--permission-prompt-tool`), listing local `claude agents` sessions, attaching to / messaging the staff
+sessions, partial-message streaming (text shows per block), an e2e scenario file for the panel (QA's area).
