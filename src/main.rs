@@ -3,10 +3,13 @@
 
 mod agents;
 mod app;
+mod dock;
 mod doc;
+mod git;
 mod project;
 mod lsp;
 mod syntax;
+mod term;
 mod ui;
 mod vim;
 
@@ -65,6 +68,7 @@ fn run(app: &mut app::App) -> Result<()> {
     while !app.quit {
         app.tick();
         redraw |= app.agents_tick();
+        redraw |= app.dock_tick();
         if redraw || last_draw.elapsed() >= Duration::from_millis(250) {
             term.draw(|f| ui::draw(f, app))?;
             redraw = false;

@@ -29,6 +29,7 @@ pub fn draw_sidebar(buf: &mut Buffer, app: &mut App, area: Rect) -> Rect {
     buf.set_stringn(side.x, side.y, " Project", inner_w as usize, head);
 
     let active = app.docs[app.active].path.as_deref().map(super::canonical);
+    let git = &app.dock.git;
     let rows_h = side.height.saturating_sub(1) as usize;
     let t = &mut p.tree;
     if t.follow {
@@ -54,6 +55,11 @@ pub fn draw_sidebar(buf: &mut Buffer, app: &mut App, area: Rect) -> Rect {
             ("  ", Style::new().fg(ACCENT).bg(bg))
         } else {
             ("  ", Style::new().fg(TEXT_2).bg(bg))
+        };
+        // Git status colours (M5): modified blue, new green.
+        let name_style = match crate::git::ui::tree_color(git, &n.path, n.is_dir) {
+            Some(c) if active.as_deref() != Some(n.path.as_path()) => name_style.fg(c),
+            _ => name_style,
         };
         let max = inner_w as usize;
         if indent + 2 >= max {

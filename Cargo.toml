@@ -14,8 +14,10 @@ anyhow = "1"
 crossterm = "0.28"
 ignore = "0.4"
 lsp-types = "0.97.0"
+portable-pty = "0.9"
 ratatui = "0.29"
 ropey = "1.6"
+similar = "3.2.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tree-sitter = "0.27.1"
@@ -29,6 +31,7 @@ tree-sitter-rust = "0.24.2"
 tree-sitter-toml-ng = "0.7.0"
 tree-sitter-typescript = "0.23.2"
 unicode-width = "0.2"
+vt100 = "0.15"
 
 [profile.release]
 lto = true

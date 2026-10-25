@@ -71,9 +71,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_tabs(buf, app, Rect::new(area.x, area.y, area.width, 1));
 
     let text_area = Rect::new(area.x, area.y + 1, area.width, area.height - 2);
+    let (text_area, dock_area) = crate::dock::split(text_area, &app.dock);
+    let dock_cursor = dock_area.and_then(|r| crate::dock::draw(buf, app, r));
     let (text_area, panel_cursor) = crate::agents::ui::draw_panel(buf, app, text_area);
     let text_area = crate::project::ui::draw_sidebar(buf, app, text_area);
-    let cursor = draw_text(buf, app, text_area).filter(|_| !app.project.focus_tree && !app.agents.focus);
+    let cursor = draw_text(buf, app, text_area).filter(|_| !app.project.focus_tree && !app.agents.focus && !app.dock.has_focus());
+    crate::dock::draw_over_editor(buf, app, text_area);
 
     let status = Rect::new(area.x, area.bottom() - 1, area.width, 1);
     let prompt_cursor = draw_status(buf, app, status);
@@ -82,7 +85,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     let popup_cursor = crate::project::ui::draw_popup(f.buffer_mut(), &mut app.project, area);
 
-    if let Some(p) = popup_cursor.or(prompt_cursor).or(panel_cursor).or(cursor) {
+    if let Some(p) = popup_cursor.or(prompt_cursor).or(dock_cursor).or(panel_cursor).or(cursor) {
         f.set_cursor_position(p);
     }
 }
@@ -92,6 +95,7 @@ pub fn block_cursor(app: &App) -> bool {
     app.prompt.is_none()
         && app.project.popup.is_none()
         && !app.project.focus_tree
+        && !app.dock.has_focus()
         && app.vim.as_ref().is_some_and(|v| v.cmdline().is_none() && v.mode != Mode::Insert)
 }
 
@@ -134,6 +138,7 @@ fn draw_text(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
     let follow = app.follow;
     let diags = app.diag_spans();
     let d = &mut app.docs[app.active];
+    let marks = app.dock.git.marks(d.path.as_deref());
     let total = d.visible_lines();
     let gutter_w = (total.to_string().len().max(3) + 2) as u16;
     let text_x = area.x + gutter_w;
@@ -164,6 +169,9 @@ fn draw_text(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
         let (ls, le) = (d.line_start(line), d.line_end(line));
         if let Some(sev) = diags.iter().filter(|(s, e, _)| *s <= le && *e > ls || *s == ls).map(|g| g.2).min() {
             buf[(area.x + gutter_w - 2, y)].set_char('●').set_fg(diag_color(sev));
+        }
+        if let Some(Some(m)) = marks.get(line) {
+            crate::git::ui::draw_mark(buf, area.x + gutter_w - 1, y, *m);
         }
 
         let start = d.line_start(line);
@@ -250,6 +258,7 @@ fn draw_status(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> 
         buf.set_string(area.x, area.y, &line, Style::new().fg(TEXT).bg(SURFACE_2));
         return Some(Position::new((area.x + line.chars().count() as u16).min(area.right() - 1), area.y));
     }
+    let rw = rw + crate::git::ui::draw_branch(buf, &app.dock.git, area, rw);
     if let Some(p) = &app.prompt {
         let label = format!(" {}: ", p.kind.label());
         buf.set_string(area.x, area.y, &label, Style::new().fg(ACCENT).bg(SURFACE_2).add_modifier(Modifier::BOLD));

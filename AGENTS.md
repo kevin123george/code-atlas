@@ -19,7 +19,8 @@ input), `ropey` (text buffer), `unicode-width`, `ignore` (ripgrep's gitignore-aw
 `tree-sitter` 0.27 + grammar crates (rust, typescript/tsx, javascript, java, python, json, toml-ng, md, bash; their
 bundled highlight queries) for highlighting, `lsp-types` 0.97 + `serde_json` with an own JSON-RPC client (LSP).
 `serde` + `serde_json` also for the agents panel (stream-json, `agents.json`); agents run the `claude` CLI.
-Planned: `portable-pty` + `vt100` (terminal pane), `git` CLI or `gix` (git).
+`portable-pty` 0.9 + `vt100` 0.15 (terminal pane; vt100 0.16 conflicts with ratatui's pinned `unicode-width`),
+`similar` (line diffs) and the `git` CLI (git).
 Language servers are found on PATH plus `~/.cargo/bin`, `~/.local/bin`, `~/.bun/bin`, `/opt/homebrew/bin`,
 `/usr/local/bin`: rust-analyzer (Mac: `rustup component add rust-analyzer rustfmt`, both added 2026-10-25),
 typescript-language-server, pyright-langserver / basedpyright-langserver / pylsp, jdtls. Missing ones are skipped
@@ -62,6 +63,17 @@ with a status message.
   recorded real runs. Hooks elsewhere: `App.agents`, `agents_key` before `project_key` (so Vim never sees panel
   keys), `agents_mouse`/`agents_paste` first in `App::handle`, `draw_panel` in `ui::draw` (takes the right
   45 columns before the sidebar), `app.agents_tick()` in the main loop, `Doc::reload_text` in `doc.rs`.
+- `src/dock.rs` – bottom dock (M5): tabs Terminal / Commit, focus, layout (`split_rows`), keys, mouse, paste,
+  `dock_tick` glue (returns "redraw"), drawing the tab row and bodies.
+- `src/term/` – terminal pane (M5): `mod.rs` PTY + reader thread + `vt100` parser, query replies, resize,
+  scrollback; `keys.rs` key → xterm bytes and query detection; `ui.rs` screen → buffer (ANSI palette in theme colours).
+- `src/git/` – git (M5): `mod.rs` state + background jobs (status, HEAD texts, gutter diffs, commit, diff view);
+  `status.rs` porcelain parser; `diff.rs` gutter marks + unified rows (`similar`); `ui.rs` gutter marks, Commit
+  panel, diff view, branch label, tree colours.
+  Hooks elsewhere: `App.dock`; `dock_key`/`dock_paste`/`dock_mouse` first in `App::handle` (before the agents panel's); `redraw |= app.dock_tick()` in the
+  main loop; `dock::split`/`draw`/`draw_over_editor`, `git::ui::draw_mark` (in `draw_text`),
+  `draw_branch` (status bar) and `!app.dock.has_focus()` (cursor, `block_cursor`) in `ui.rs`; `tree_color` in
+  `project/ui.rs`.
 - `docs/ROADMAP.md` – milestones and who owns which files. `docs/decisions/` – project decisions.
 
 ## Run & test
@@ -99,7 +111,8 @@ None yet. Later: `cargo install --path .` on the Mac and the laptop.
 - Every edit goes through `Doc::begin(kind)` so undo works; runs of typing/deleting group into one step.
 - Keys follow IntelliJ's default Windows/Linux keymap (see `app.rs` `key()`); terminal-impossible keys get a
   documented fallback (Ctrl+Shift+Z redo → also Alt+Z).
-- Colours only from `ui::theme`. Line endings of a file are kept (LF/CRLF). Popups: centred box, `SURFACE_1`
+- Colours only from `ui::theme` (M5 exceptions, kept local to avoid clashing with M3's theme edits: `git::ui`
+  BLUE / ADD_BG / DEL_BG and the terminal's ANSI palette in `term::ui`). Line endings of a file are kept (LF/CRLF). Popups: centred box, `SURFACE_1`
   background, `ACCENT` title, selected row `SELECTION`.
 - Background work (walks, searches) runs on threads and streams through `mpsc` channels; `App::tick()` drains them
   before every draw (the loop wakes at least every 250 ms). Never block the main loop on the file system.
@@ -145,6 +158,19 @@ and completion opens by itself only in insert mode. The language name sits befor
 | Ctrl+Alt+Y | reload the current file from disk (asks once if it has unsaved edits) |
 | mouse | click a run / the prompt, wheel scrolls the transcript |
 
+## Keys (terminal, git)
+| Key | Does |
+|---|---|
+| **Alt+F12** | terminal: open + focus (starts `$SHELL -l` in the project root); focused: hide the dock |
+| in the terminal | every key goes to the shell (Esc, Ctrl+C, Ctrl+R ...) · **Ctrl+Alt+↑** back to the editor (dock stays) · Shift+Esc hide · Shift+PgUp/PgDn or wheel scrollback · Alt+1 / Alt+9 switch tool window · Enter restarts an exited shell |
+| **Alt+0** | Commit panel (toggles) · **Ctrl+K** opens it with the cursor in the message (again with a message: commit) |
+| in the Commit panel | ↑↓ PgUp PgDn Home End · Space tick/untick · Ctrl+A all/none · Enter or F4 diff · Tab list ↔ message · typing starts the message · **Ctrl+Enter** commit (fallbacks **Alt+Enter**, Ctrl+J) · F5 refresh · Esc editor; click a row, click `[x]` to tick |
+| in the diff view | ↑↓ PgUp PgDn (Space) Home End scroll · F7 / Shift+F7 (n / p) next/previous hunk · Alt+↑/↓ previous/next file · F4 / Enter open the file there · Esc back to the panel |
+| dock focused | Ctrl+Shift+↑/↓ taller/shorter |
+- Gutter: green bar = added line, blue bar = changed, red ▁ = lines deleted below (▔ at the top of the file), vs
+  HEAD and live while typing. Tree: modified blue, new green, folders with changes blue. Branch: `⎇ main` in the
+  status bar. The editor never pushes, forces, amends or resets.
+
 ## Keys (Vim mode)
 Off by default. On with `catlas --vim`, `CATLAS_VIM=1`, or **Ctrl+Alt+V** at runtime (toggles; the status bar
 badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in normal/visual mode).
@@ -187,6 +213,13 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
   repeat counts) but uses the same `Doc::type_char`/`newline`, so IDEA's pairing and smart Enter still apply.
 - tmux shows no cursor shape: check Vim's block/bar cursor in the raw stream (`tmux pipe-pane -O 'cat > f'`,
   look for `ESC[2 q` block / `ESC[6 q` bar).
+- Terminal: login shells can drop keys typed in their first second (zsh plugins); e2e waits 1.5 s first.
+  `vt100` doesn't answer queries, so `term::keys::queries` replies to `ESC[6n` and `ESC[c` (fish/zsh wait for
+  them). Shells need Esc, hence Ctrl+Alt+↑ / Alt+F12 to leave. Ctrl+Enter only arrives with the kitty protocol;
+  elsewhere it's Enter or Ctrl+J, hence Alt+Enter. `set_style` doesn't clear symbols: anything drawn over the
+  editor (diff view) must `Clear` first.
+- Git e2e: scratch repos in `$SCRATCH` must exclude the harness files (`bin/pbcopy`, `.expected` ...) or they
+  show as untracked. Never commit in a real repo from the editor during tests.
 - In a git worktree `.git` is a *file*; the tree hides `.git` whatever its type.
 - In tmux tests, don't send `Escape` and an Alt key in one `send-keys` call: `ESC ESC f` reads as Esc + typed "f".
   Mouse clicks can be sent as SGR sequences: `tmux send-keys -t s -l $'\e[<0;COL;ROWM\e[<0;COL;ROWm'` (1-based).
@@ -219,6 +252,7 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 `docs/decisions/0003-vim-mode.md` – M4 choices: who gets which key, undo groups, register, `:q` per tab, plain-text search.
 `docs/decisions/0004-code-smarts.md` – M3 choices: own query cursor + diff-based incremental parse, full-text sync, F1 hover, no snippets.
 `docs/decisions/0005-agents-panel.md` – M6 choices: one `claude -p` per turn + `--resume`, flags only from `claude --help` (never bypass), stop by process group, reload rules, `agents.json`, staff over SSH.
+`docs/decisions/0006-git-and-terminal.md` – M5 choices: bottom dock, PTY + vt100, git CLI + in-memory gutter diffs, commit rules (never push/force), leave keys.
 
 ## Current state (2026-10-25)
 M1 core editing done (tabs, undo/redo, selection, bracket pairing, smart Enter/Home, duplicate/delete/move line,
@@ -251,3 +285,11 @@ reload of open files the agent changed (or "changed on disk" when they have unsa
 follow-up editing a dirty file, stop) and free fake-CLI runs. Not done yet: answering permission prompts from the
 panel (`--permission-prompt-tool`), listing local `claude agents` sessions, attaching to / messaging the staff
 sessions, partial-message streaming (text shows per block), an e2e scenario file for the panel (QA's area).
+M5 git + terminal done 2026-10-25 (see Keys (terminal, git), decision 0006): bottom dock with a real PTY terminal
+(colours, resize, scrollback, exit/restart), live gutter marks vs HEAD, Commit panel with ticks + message +
+commit, unified diff view, branch in the status bar, git colours in the tree. Tests: unit (status parsing, diff
+→ marks/hunks, key encoding, query detection, dock layout, a real PTY, a scratch-repo status → gutter → diff →
+commit flow) and e2e `tests/e2e/scenarios/git_term.sh` (terminal echo/ls, gutter + branch, panel → diff →
+commit landing in `git log`). Not done yet: several terminals as tabs, mouse forwarding to terminal programs,
+copying text out of the terminal, side-by-side diff, staging single hunks, rollback/revert, a cursor in the
+commit message (append-only editing), Problems tab (M3 diagnostics could go there).

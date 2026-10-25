@@ -67,6 +67,8 @@ pub struct App {
     pub lsp: crate::lsp::Lsp,
     /// Agents panel: Claude Code runs, staff (`src/agents/`).
     pub agents: crate::agents::Agents,
+    /// Bottom dock: terminal, commit panel, git state (`src/dock.rs`, `src/git/`, `src/term/`).
+    pub dock: crate::dock::Dock,
 }
 
 impl App {
@@ -82,8 +84,10 @@ impl App {
             docs.push(Doc::empty());
         }
         project.focus_tree = as_project && paths.is_empty();
+        let dock = crate::dock::Dock::new(&project.root);
         Ok(App {
             agents: crate::agents::Agents::new(project.root.clone()),
+            dock,
             project,
             docs,
             active: 0,
@@ -138,7 +142,10 @@ impl App {
             Event::Key(k) if k.kind != KeyEventKind::Release => {
                 let armed = self.armed.take();
                 let before = self.active;
-                if self.prompt.is_some() {
+                if self.dock_key(k) {
+                    // Handled by the dock (terminal, commit panel, diff view).
+                    self.after_ide(before);
+                } else if self.prompt.is_some() {
                     self.prompt_key(k);
                     self.after_ide(before);
                 } else if self.agents_key(k) {
@@ -157,7 +164,7 @@ impl App {
                 self.follow = true;
             }
             Event::Paste(text) => {
-                if self.agents_paste(&text) {
+                if self.dock_paste(&text) || self.agents_paste(&text) {
                     return;
                 }
                 if self.vim.as_mut().is_some_and(|v| v.paste(&text)) {
@@ -175,7 +182,7 @@ impl App {
             }
             Event::Mouse(m) => {
                 let before = self.active;
-                if !self.agents_mouse(m) && !self.project_mouse(m) {
+                if !self.dock_mouse(m) && !self.agents_mouse(m) && !self.project_mouse(m) {
                     self.mouse(m);
                 }
                 self.after_ide(before);
