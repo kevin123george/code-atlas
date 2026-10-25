@@ -380,7 +380,9 @@ impl App {
             }
             "window/showMessage" => {
                 let kind = params.get("type").and_then(Value::as_u64).unwrap_or(4);
-                if kind <= 2 {
+                // Unprompted server news waits for a free status bar: it must not hide the
+                // editor's own feedback ("Saved …", "Not found …").
+                if kind <= 2 && self.message.is_none() {
                     let msg = params.get("message").and_then(Value::as_str).unwrap_or("").lines().next().unwrap_or("").to_string();
                     self.message = Some(format!("{name}: {msg}"));
                 }
