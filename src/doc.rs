@@ -169,7 +169,7 @@ impl Doc {
 
     /// Lines with content: the empty line after a final line break doesn't count. Line moves and
     /// deletes use this so the file's final line break stays where it is.
-    fn content_lines(&self) -> usize {
+    pub fn content_lines(&self) -> usize {
         let n = self.rope.len_lines();
         if n > 1 && self.rope.line(n - 1).len_chars() == 0 { n - 1 } else { n }
     }

@@ -101,11 +101,11 @@ pub fn len(d: &Doc) -> usize {
 }
 
 pub fn line_of(d: &Doc, p: usize) -> usize {
-    d.rope.char_to_line(p.min(len(d))).min(d.visible_lines() - 1)
+    d.rope.char_to_line(p.min(len(d))).min(d.content_lines() - 1)
 }
 
 pub fn last_line(d: &Doc) -> usize {
-    d.visible_lines() - 1
+    d.content_lines() - 1
 }
 
 pub fn indent_len(d: &Doc, line: usize) -> usize {

@@ -10,7 +10,7 @@ run and watch Claude agents. Binary: `catlas`.
 `catlas <dir>` opens a project (no arguments = the current folder); `catlas <dir> file …` also opens files.
 
 ## Where it runs
-Locally in a terminal on the Mac and the laptop (`catlas [dir] [file ...]`). No server. Best in a terminal with the
+Locally in a terminal on the Mac and the laptop (`catlas [--vim] [dir] [file ...]`). No server. Best in a terminal with the
 kitty keyboard protocol (Ghostty, kitty, WezTerm, iTerm2 with "CSI u" on): it is needed for Ctrl+Shift combos.
 
 ## Stack
@@ -28,12 +28,19 @@ client (LSP), `portable-pty` + `vt100` (terminal pane), `git` CLI or `gix` (git)
   `search.rs` background file index + find in files (threads, channels, cancel on drop); `ui.rs` sidebar + popups.
   Hooks elsewhere: `App.project`, `project_key`/`project_mouse` calls in `App::handle`, `draw_sidebar`/`draw_popup`
   in `ui::draw`, `app.tick()` in the main loop.
+- `src/vim/` – optional Vim mode (M4): `mod.rs` modes, key parser (counts, operators, `.` record/replay),
+  operators, visual mode, the `Effect`s it hands back to `App`, and the IDEA-side sync (`wants`, `before_ide`,
+  `after_ide`, `fix`, `leave`); `motion.rs` motions + text objects (pure functions over a `Doc`); `ex.rs` the
+  `:` / `/` / `?` command line; `tests.rs` key-sequence tests (`check("ab|c", "dw", "a|b")`, `|` = cursor).
+  Hooks elsewhere: `App.vim` + `App::key` (Vim first, then `idea_key`), `App::vim_effect`, `after_ide` calls after
+  prompts/mouse/paste/project keys; `ui::block_cursor` + mode badge, showcmd and command line in the status bar;
+  `Doc::begin_group`/`end_group`/`replace`/`indent`/`set_want_col`/`content_lines` helpers in `doc.rs`.
 - `docs/ROADMAP.md` – milestones and who owns which files. `docs/decisions/` – project decisions.
 
 ## Run & test
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo test                 # unit tests (doc.rs edit logic, project tree/fuzzy/search)
+cargo test                 # unit tests (doc.rs edit logic, project tree/fuzzy/search, Vim engine)
 cargo run -- some/file.rs  # try it
 cargo build --release      # target/release/catlas
 ```
@@ -83,18 +90,48 @@ None yet. Later: `cargo install --path .` on the Mac and the laptop.
 - New features go in their own module (`src/<feature>/…`) with a small hook in `app.rs`/`ui.rs`, so parallel work
   doesn't collide.
 
+## Keys (Vim mode)
+Off by default. On with `catlas --vim`, `CATLAS_VIM=1`, or **Ctrl+Alt+V** at runtime (toggles; the status bar
+badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in normal/visual mode).
+| Area | Keys |
+|---|---|
+| modes | `i a I A o O` insert (with a count: `3ix<Esc>`), `v` visual, `V` visual line, `:` command line, Esc / Ctrl+[ back to normal |
+| motions (all take counts) | `h j k l` + arrows, `w b e W B E`, `0 ^ $` Home End, `gg G {n}G`, `f F t T ; ,`, `%`, `{ }`, `+ - Enter`, `n N * #` |
+| operators | `d c y > < gu gU g~` + motion, text object (`iw aw iW aW i" a" i' a' i( a( ib i{ a{ iB i[ a[ i< a<`) or doubled (`dd cc yy >> << guu`) |
+| short commands | `x X s S r{c} J ~ D C Y p P u Ctrl+R .` (`.` repeats the last change incl. typed text; a count replaces its count) |
+| visual | motions, text objects, `o` swap ends, `d x c s y > < ~ u U J r{c} p`, `D X C S Y` whole lines, `:` gives `:'<,'>` |
+| search | `/text` `?text` (Enter; empty = last), `n N`, `* #` whole word; plain text, smart case (`Doc::find`) |
+| `:` commands | `w [path]`, `q`, `q!`, `wq`, `x`, `wa`, `qa`, `qa!`, `wqa`, `e path`, `{n}`, `d`, `s/a/b/[gi]` (`&` = match, any delimiter), ranges `%`, `n,m`, `.`, `$`, `.+k`, `'<,'>` |
+- One Vim command (or one insert session from `i` to Esc) is one undo step; moving with arrows inside insert
+  mode starts a new one (as in Vim).
+- Ctrl/Alt chords stay IDEA's in every mode (Ctrl+S, Ctrl+Q, Ctrl+F, Ctrl+P, Alt+arrows, Ctrl+D duplicate, Ctrl+V
+  paste...) except Ctrl+R (redo) and Ctrl+[ (Esc). Shift+arrows select like IDEA and so enter visual mode, as
+  does a mouse drag or a Ctrl+F match.
+- Register: the editor clipboard (`y`/`d`/`p` and Ctrl+C/Ctrl+V share it); only `y` also copies to the system
+  clipboard (so `x`/`dd` don't overwrite it).
+- `:q` closes the tab (the last tab quits); `:qa` quits; both refuse unsaved work without `!` (E37).
+
 ## Gotchas
 - Terminals without the kitty protocol can't send Ctrl+Shift+letter, Ctrl+/ arrives as Ctrl+7 or Ctrl+_,
   Ctrl+Backspace as Ctrl+H. macOS Terminal.app lacks the protocol.
 - Shift+F3 (find previous) doesn't work without the kitty protocol: legacy terminals send `ESC[1;2R`, which
   crossterm 0.28 (`parse.rs`) reads as a cursor-position report and drops. Fallback: **Alt+P**.
 - A final line break opens one more (empty) line that is drawn and reachable (as in IntelliJ):
-  `Doc::visible_lines()` counts it; line moves/deletes use the private `content_lines()` so the final break stays.
+  `Doc::visible_lines()` counts it; line moves/deletes use `content_lines()` so the final break stays. Vim
+  motions (`G`, `j`, `dG`) use `content_lines()` too: in Vim that empty line doesn't exist.
 - tmux `send-keys -l 'x;'`: a trailing `;` is a tmux command separator and is lost; send it as `'\;'`
   (the e2e `typ` helper does this).
 - Shift+Shift ("search everywhere") needs key *release* events (kitty `REPORT_EVENT_TYPES`); plan a fallback.
 - Ctrl+Shift+N / Ctrl+Shift+F arrive as Ctrl+N / Ctrl+F without the kitty protocol (new file / find), hence the
   Ctrl+P / Alt+F fallbacks. Alt+1, Alt+F need "Option as Meta" on macOS terminals (else they type `¡`, `ƒ`).
+- Vim mode's undo groups: `Doc::begin_group` makes every edit until `end_group` one step; `undo`/`redo`
+  inside an open group re-arm it. Anything editing for Vim must stay inside `Vim::key` (it opens/closes the group)
+  or the insert session; the Vim visual range is inclusive while `Doc::selection` is `[s, e)`, so `before_ide`
+  selects the exact range before an IDEA chord and `after_ide` restores direction afterwards.
+- Vim `wants()` decides who gets a key; insert-mode typing goes through Vim too (to record it for `.` and
+  repeat counts) but uses the same `Doc::type_char`/`newline`, so IDEA's pairing and smart Enter still apply.
+- tmux shows no cursor shape: check Vim's block/bar cursor in the raw stream (`tmux pipe-pane -O 'cat > f'`,
+  look for `ESC[2 q` block / `ESC[6 q` bar).
 - In a git worktree `.git` is a *file*; the tree hides `.git` whatever its type.
 - In tmux tests, don't send `Escape` and an Alt key in one `send-keys` call: `ESC ESC f` reads as Esc + typed "f".
   Mouse clicks can be sent as SGR sequences: `tmux send-keys -t s -l $'\e[<0;COL;ROWM\e[<0;COL;ROWm'` (1-based).
@@ -106,6 +143,7 @@ None yet. Later: `cargo install --path .` on the Mac and the laptop.
 ## Decisions
 `docs/decisions/0001-stack-and-keymap.md` – Rust + ratatui, IDEA keys by default, Vim optional, internal tool.
 `docs/decisions/0002-project-view.md` – M2 choices: args, ignore rules, own fuzzy scorer, smart-case find in files, fallback keys.
+`docs/decisions/0003-vim-mode.md` – M4 choices: who gets which key, undo groups, register, `:q` per tab, plain-text search.
 
 ## Current state (2026-10-25)
 M1 core editing done (tabs, undo/redo, selection, bracket pairing, smart Enter/Home, duplicate/delete/move line,
@@ -118,3 +156,8 @@ file's final line break; a quote or bracket typed over a selection replaced it i
 letter/quote was next to it. Then (same day) the empty line after a final line break is
 drawn and reachable like in IntelliJ (fixes Ctrl+End landing on a hidden line), and Alt+P finds the previous
 match where Shift+F3 can't arrive. Suite: 31/31 pass.
+M4 Vim mode done 2026-10-25 (see Keys (Vim mode)): 60 engine tests (several hundred key-sequence checks) in `src/vim/tests.rs`, checked in tmux
+(ci", dd/u, /foo n, :%s, Vj>, `.`, Ctrl+Alt+V, Ctrl+S in normal mode, :q refusing, :wq, :e, block/bar cursor).
+Not done yet: named registers and `"`, marks, macros (`q`/`@`), Ctrl+V block visual, Ctrl+D/U/O/I (IDEA keeps
+Ctrl+D), `gv`, `ge`, regex search/substitute, `:set`, a Vim toggle in the settings file / command palette (M7),
+and an e2e scenario file for Vim (`tests/e2e/scenarios/vim.sh`, QA's area).

@@ -151,6 +151,10 @@ fn file_motions() {
     check("|a\n  b\nc", "2G", "a\n  |b\nc");
     check("|a\n  b\nc", "2gg", "a\n  |b\nc");
     check("|a\nb\n", "G", "a\n|b\n");
+    // The empty line IDEA draws after a final line break is not a Vim line.
+    check("a\n|b\n", "j", "a\n|b\n");
+    check("|a\nb\n", "5j", "a\n|b\n");
+    check("|a\nb\n", "dG", "|");
 }
 
 #[test]
