@@ -40,14 +40,15 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_tabs(buf, app, Rect::new(area.x, area.y, area.width, 1));
 
     let text_area = Rect::new(area.x, area.y + 1, area.width, area.height - 2);
+    let (text_area, panel_cursor) = crate::agents::ui::draw_panel(buf, app, text_area);
     let text_area = crate::project::ui::draw_sidebar(buf, app, text_area);
-    let cursor = draw_text(buf, app, text_area).filter(|_| !app.project.focus_tree);
+    let cursor = draw_text(buf, app, text_area).filter(|_| !app.project.focus_tree && !app.agents.focus);
 
     let status = Rect::new(area.x, area.bottom() - 1, area.width, 1);
     let prompt_cursor = draw_status(buf, app, status);
     let popup_cursor = crate::project::ui::draw_popup(f.buffer_mut(), &mut app.project, area);
 
-    if let Some(p) = popup_cursor.or(prompt_cursor).or(cursor) {
+    if let Some(p) = popup_cursor.or(prompt_cursor).or(panel_cursor).or(cursor) {
         f.set_cursor_position(p);
     }
 }

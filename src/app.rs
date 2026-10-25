@@ -57,6 +57,8 @@ pub struct App {
     pub follow: bool,
     /// Project view: tree, finder, find in files, recent files (`src/project/`).
     pub project: crate::project::Project,
+    /// Agents panel: Claude Code runs, staff (`src/agents/`).
+    pub agents: crate::agents::Agents,
 }
 
 impl App {
@@ -73,6 +75,7 @@ impl App {
         }
         project.focus_tree = as_project && paths.is_empty();
         Ok(App {
+            agents: crate::agents::Agents::new(project.root.clone()),
             project,
             docs,
             active: 0,
@@ -103,6 +106,8 @@ impl App {
                 let armed = self.armed.take();
                 if self.prompt.is_some() {
                     self.prompt_key(k);
+                } else if self.agents_key(k) {
+                    // Handled by the agents panel (src/agents/).
                 } else if self.project_key(k) {
                     // Handled by the project view (src/project/).
                 } else {
@@ -116,13 +121,14 @@ impl App {
                     p.input.push_str(text.lines().next().unwrap_or(""));
                 } else if self.project.popup.is_some() {
                     self.project.paste(&text);
+                } else if self.agents_paste(&text) {
                 } else {
                     self.doc_mut().insert_str(&text);
                     self.follow = true;
                 }
             }
             Event::Mouse(m) => {
-                if !self.project_mouse(m) {
+                if !self.agents_mouse(m) && !self.project_mouse(m) {
                     self.mouse(m);
                 }
             }

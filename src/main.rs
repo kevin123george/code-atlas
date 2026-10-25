@@ -1,6 +1,7 @@
 //! Code Atlas: a terminal code editor with IntelliJ-style keys.
 //! Usage: `catlas [dir] [file ...]` (no folder given = the current folder is the project)
 
+mod agents;
 mod app;
 mod doc;
 mod project;
@@ -50,6 +51,7 @@ fn run(app: &mut app::App) -> Result<()> {
     term.clear()?;
     while !app.quit {
         app.tick();
+        app.agents_tick();
         term.draw(|f| ui::draw(f, app))?;
         if event::poll(Duration::from_millis(250))? {
             app.handle(event::read()?);
