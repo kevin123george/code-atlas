@@ -54,6 +54,8 @@ pub struct Doc {
     rev: u64,
     next_rev: u64,
     saved_rev: u64,
+    /// Language, parse tree and highlighting (M3, `src/syntax/`).
+    pub syntax: crate::syntax::Syntax,
 }
 
 impl Doc {
@@ -79,7 +81,9 @@ impl Doc {
 
     fn from_rope(rope: Rope, path: Option<PathBuf>) -> Self {
         let crlf = rope.chars().take(100_000).collect::<String>().contains("\r\n");
+        let syntax = crate::syntax::Syntax::detect(path.as_deref(), &rope);
         Doc {
+            syntax,
             rope,
             path,
             cursor: 0,
@@ -109,6 +113,17 @@ impl Doc {
         self.saved_rev = self.rev;
         self.last_edit = EditKind::None;
         Ok(())
+    }
+
+    /// Changes the file name (Save as) and picks the language again.
+    pub fn set_path(&mut self, path: PathBuf) {
+        self.syntax = crate::syntax::Syntax::detect(Some(&path), &self.rope);
+        self.path = Some(path);
+    }
+
+    /// Revision of the text: changes with every edit, undo and redo.
+    pub fn rev(&self) -> u64 {
+        self.rev
     }
 
     pub fn dirty(&self) -> bool {
@@ -204,7 +219,7 @@ impl Doc {
 
     /// First and last line touched by the selection (or the cursor line). A selection that
     /// ends at the start of a line doesn't count that line.
-    fn line_span(&self) -> (usize, usize) {
+    pub fn line_span(&self) -> (usize, usize) {
         match self.selection() {
             Some((s, e)) => {
                 let a = self.rope.char_to_line(s);
@@ -409,6 +424,16 @@ impl Doc {
     }
 
     // ---- edits -----------------------------------------------------------------------------
+
+    /// An edit made by another module (comment toggling, LSP edits) as one undo step:
+    /// `f` gets the text, the cursor and the selection anchor to change.
+    pub fn edit_with(&mut self, f: impl FnOnce(&mut Rope, &mut usize, &mut Option<usize>)) {
+        self.begin(EditKind::Other);
+        f(&mut self.rope, &mut self.cursor, &mut self.anchor);
+        let len = self.rope.len_chars();
+        self.cursor = self.cursor.min(len);
+        self.anchor = self.anchor.map(|a| a.min(len));
+    }
 
     fn delete_selection(&mut self) -> bool {
         match self.selection() {

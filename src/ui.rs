@@ -25,6 +25,36 @@ pub mod theme {
     pub const WARNING: Color = Color::Rgb(0xfa, 0xb2, 0x19);
     /// Selection: the accent mixed into the surface.
     pub const SELECTION: Color = Color::Rgb(0x14, 0x3a, 0x4a);
+
+    // Code tokens, from the Ledger Terminal series palette (dark).
+    pub const S_BLUE: Color = Color::Rgb(0x5b, 0x9b, 0xf0);
+    pub const S_ORANGE: Color = Color::Rgb(0xff, 0x97, 0x58);
+    pub const S_AQUA: Color = Color::Rgb(0x33, 0xd6, 0xa0);
+    pub const S_YELLOW: Color = Color::Rgb(0xf0, 0xb4, 0x29);
+    pub const S_MAGENTA: Color = Color::Rgb(0xf2, 0x8a, 0xb5);
+    pub const S_VIOLET: Color = Color::Rgb(0x9a, 0x8c, 0xf5);
+    pub const S_TEAL: Color = Color::Rgb(0x33, 0xbc, 0xdb);
+
+    /// Colour (and italic for comments) of a highlighted token.
+    pub fn token_style(t: crate::syntax::Token) -> ratatui::style::Style {
+        use crate::syntax::Token::*;
+        use ratatui::style::{Modifier, Style};
+        let fg = match t {
+            Keyword => S_TEAL,
+            String | Link => S_AQUA,
+            Escape => S_MAGENTA,
+            Comment => return Style::new().fg(MUTED).add_modifier(Modifier::ITALIC),
+            Number => S_ORANGE,
+            Constant | Builtin => S_VIOLET,
+            Type | Tag => S_YELLOW,
+            Function => S_BLUE,
+            Macro | Attribute | Label => S_MAGENTA,
+            Property | Parameter => TEXT,
+            Operator | Punctuation => TEXT_2,
+            Heading => return Style::new().fg(S_BLUE).add_modifier(Modifier::BOLD),
+        };
+        Style::new().fg(fg)
+    }
 }
 
 use theme::*;
@@ -45,6 +75,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     let status = Rect::new(area.x, area.bottom() - 1, area.width, 1);
     let prompt_cursor = draw_status(buf, app, status);
+    if let (Some(p), Some(at), None) = (&app.lsp.popup, cursor, prompt_cursor) {
+        crate::lsp::popup::draw(f.buffer_mut(), p, at, area);
+    }
     let popup_cursor = crate::project::ui::draw_popup(f.buffer_mut(), &mut app.project, area);
 
     if let Some(p) = popup_cursor.or(prompt_cursor).or(cursor) {
@@ -79,8 +112,17 @@ fn draw_tabs(buf: &mut Buffer, app: &mut App, area: Rect) {
     }
 }
 
+fn diag_color(severity: u8) -> ratatui::style::Color {
+    match severity {
+        1 => CRITICAL,
+        2 => WARNING,
+        _ => S_BLUE,
+    }
+}
+
 fn draw_text(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
     let follow = app.follow;
+    let diags = app.diag_spans();
     let d = &mut app.docs[app.active];
     let total = d.visible_lines();
     let gutter_w = (total.to_string().len().max(3) + 2) as u16;
@@ -95,6 +137,8 @@ fn draw_text(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
 
     let cur_line = d.line();
     let sel = d.selection();
+    d.syntax.update(&d.rope, d.rev());
+    let tokens = d.syntax.visible(&d.rope, d.scroll_line, h).to_vec();
     for row in 0..h {
         let line = d.scroll_line + row;
         let y = area.y + row as u16;
@@ -107,6 +151,10 @@ fn draw_text(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
         buf.set_style(Rect::new(area.x, y, area.width, 1), Style::new().bg(line_bg));
         let num_style = if is_cur { Style::new().fg(ACCENT) } else { Style::new().fg(MUTED) };
         buf.set_string(area.x, y, format!("{:>w$}  ", line + 1, w = gutter_w as usize - 2), num_style.bg(line_bg));
+        let (ls, le) = (d.line_start(line), d.line_end(line));
+        if let Some(sev) = diags.iter().filter(|(s, e, _)| *s <= le && *e > ls || *s == ls).map(|g| g.2).min() {
+            buf[(area.x + gutter_w - 2, y)].set_char('●').set_fg(diag_color(sev));
+        }
 
         let start = d.line_start(line);
         let len = d.line_len(line);
@@ -115,7 +163,11 @@ fn draw_text(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
             let w = char_width(c, col);
             let pos = start + i;
             let selected = sel.is_some_and(|(s, e)| pos >= s && pos < e);
-            let style = Style::new().fg(TEXT).bg(if selected { SELECTION } else { line_bg });
+            let tok = tokens.get(row).and_then(|t| t.get(i).copied().flatten());
+            let mut style = tok.map_or(Style::new().fg(TEXT), token_style).bg(if selected { SELECTION } else { line_bg });
+            if let Some(sev) = diags.iter().filter(|(s, e, _)| pos >= *s && pos < *e).map(|g| g.2).min() {
+                style = style.add_modifier(Modifier::UNDERLINED).underline_color(diag_color(sev));
+            }
             for k in 0..w {
                 let vc = col + k;
                 if vc < d.scroll_col || vc >= d.scroll_col + text_w {
@@ -152,15 +204,17 @@ fn draw_text(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
     visible.then(|| Position::new(text_x + (col - d.scroll_col) as u16, area.y + (line - d.scroll_line) as u16))
 }
 
-fn draw_status(buf: &mut Buffer, app: &App, area: Rect) -> Option<Position> {
+fn draw_status(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
+    let hint = if app.message.is_none() && app.prompt.is_none() { app.lsp_hint() } else { None };
     buf.set_style(area, Style::new().bg(SURFACE_2).fg(TEXT_2));
     let d = app.doc();
     let right = format!(
-        " Ln {}, Col {}{} · {} · UTF-8 · IDEA ",
+        " Ln {}, Col {}{} · {} · UTF-8 · {} · IDEA ",
         d.line() + 1,
         d.col() + 1,
         d.selection().map(|(s, e)| format!(" ({} chars)", e - s)).unwrap_or_default(),
         if d.crlf { "CRLF" } else { "LF" },
+        d.syntax.lang.name(),
     );
     let rw = right.chars().count() as u16;
     if rw < area.width {
@@ -178,7 +232,11 @@ fn draw_status(buf: &mut Buffer, app: &App, area: Rect) -> Option<Position> {
         Some(m) if m.contains("not saved") || m.contains("Not saved") => (m.clone(), WARNING),
         Some(m) if m.starts_with("Saved") => (m.clone(), GOOD),
         Some(m) => (m.clone(), TEXT_2),
-        None => (d.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "untitled".into()), MUTED),
+        None => match hint {
+            Some((h, sev)) if sev > 0 => (h, diag_color(sev)),
+            Some((h, _)) => (h, TEXT_2),
+            None => (d.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "untitled".into()), MUTED),
+        },
     };
     let max = area.width.saturating_sub(rw + 2) as usize;
     let text: String = text.chars().take(max).collect();

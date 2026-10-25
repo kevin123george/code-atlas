@@ -4,11 +4,13 @@
 mod app;
 mod doc;
 mod project;
+mod lsp;
+mod syntax;
 mod ui;
 
 use std::io::{self, stdout};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::cursor::SetCursorStyle;
@@ -48,16 +50,25 @@ fn main() -> Result<()> {
 fn run(app: &mut app::App) -> Result<()> {
     let mut term = Terminal::new(CrosstermBackend::new(stdout()))?;
     term.clear()?;
+    let mut redraw = true;
+    let mut last_draw = Instant::now();
     while !app.quit {
         app.tick();
-        term.draw(|f| ui::draw(f, app))?;
-        if event::poll(Duration::from_millis(250))? {
+        if redraw || last_draw.elapsed() >= Duration::from_millis(250) {
+            term.draw(|f| ui::draw(f, app))?;
+            redraw = false;
+            last_draw = Instant::now();
+        }
+        // Short poll so language-server replies show up quickly.
+        if event::poll(Duration::from_millis(30))? {
             app.handle(event::read()?);
             // Drain queued events (fast typing, pastes) before the next draw.
             while !app.quit && event::poll(Duration::ZERO)? {
                 app.handle(event::read()?);
             }
+            redraw = true;
         }
+        redraw |= app.lsp_tick();
     }
     Ok(())
 }
