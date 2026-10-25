@@ -109,6 +109,14 @@ yaml-language-server; TOML taplo; Markdown marksman; Dockerfile docker-langserve
   main loop; `dock::split`/`draw`/`draw_over_editor`, `git::ui::draw_mark` (in `draw_text`),
   `draw_branch` (status bar) and `!app.dock.has_focus()` (cursor, `block_cursor`) in `ui.rs`; `tree_color` in
   `project/ui.rs`.
+- `src/hints/` – shortcut helper (key-hints, decision 0008): `mod.rs` `Hints` state (on, kitty, tip), `context()`
+  (what has focus → one of 20 `Ctx`), the key-label parser, Key Promoter (`hints_key`, `hints_mouse`); `table.rs`
+  **the hint rows per context, as data** (+ fallbacks and tip keys); `ui.rs` placement (bottom right, top right
+  when the cursor line is under it) and the glass drawing; `tests.rs` the binding check and drawing tests.
+  Hooks elsewhere: `App.hints`, `hints_key` first in `App::handle`, `hints_before`/`hints_mouse` around the mouse
+  handlers, `hints::ui::draw` in `ui::draw` (after the editor, before popups), `theme::GHOST`, `--no-hints` and
+  `app.hints.kitty = enhanced` in `main.rs`; `Terminal::feed` (tests only).
+- `src/config.rs` – `settings.toml` (`hints = true`) in the config folder: load (defaults on any problem), save one key.
 - `docs/ROADMAP.md` – milestones and who owns which files. `docs/decisions/` – project decisions.
 
 ## Run & test
@@ -128,6 +136,9 @@ E2E_NO_BUILD=1 CATLAS=path tests/e2e/run.sh   # test another binary; E2E_KEEP=1 
   `start <cols> <rows> [file…]`, `typ <text>`, `key <tmux key names…>`, `raw <hex bytes>`, `wait_for`,
   `wait_gone`, `status "Ln 3, Col 2 "`, `wait_line <n> <text>`, `cursor_at <x> <y>`, `save`,
   `assert_file <path> $'…'`, `assert_clipboard`, `assert_exited`, `note` (extra column, e.g. timings).
+- `start` points `CATLAS_CONFIG_DIR` at `$CFG` (`$SCRATCH/bin/.catlas-config`), never the real `~/.config`, and
+  writes `hints = false` there so the shortcut helper doesn't cover screen checks; `E2E_HINTS=1` (in the
+  scenario, before `start`) gives the real default (on). See `scenarios/hints.sh`.
 - Each scenario gets its own scratch dir under `$TMPDIR` (cwd of the editor) and session on a private tmux
   socket (`-L catlas-e2e-<pid>`), so your own tmux is never touched. A failing scenario saves its screen to
   `tests/e2e/out/<scenario>.txt` (gitignored). A fake `pbcopy` on PATH catches Ctrl+C/X, so the real
@@ -149,8 +160,22 @@ None yet. Later: `cargo install --path .` on the Mac and the laptop.
 - Colours only from `ui::theme` (M5 exceptions, kept local to avoid clashing with M3's theme edits: `git::ui`
   BLUE / ADD_BG / DEL_BG and the terminal's ANSI palette in `term::ui`). Line endings of a file are kept (LF/CRLF). Popups: centred box, `SURFACE_1`
   background, `ACCENT` title, selected row `SELECTION`.
+- **New key bindings must be added to `src/hints/table.rs`** (when they are among the useful few for their
+  context; at most 8 rows each, fallbacks via `fb(kitty key, legacy key, …)`). `cargo test hints` feeds every row
+  into a fresh `App` and fails on a key that does nothing there; keep that test green instead of loosening it.
 - Background work (walks, searches) runs on threads and streams through `mpsc` channels; `App::tick()` drains them
   before every draw (the loop wakes at least every 250 ms). Never block the main loop on the file system.
+
+## Keys (shortcut helper)
+| Key | Does |
+|---|---|
+| **Alt+/** (also Alt+?; Alt+Shift+7 on German layouts) | show / hide the shortcut helper, everywhere (terminal too); saved as `hints = true/false` in `~/.config/code-atlas/settings.toml` |
+| `catlas --no-hints` | start without it (this run only, nothing saved) |
+The panel sits bottom right in the editor area (top right while the cursor line is under it), shows the keys for
+what has focus (title: `editor · IDEA`, `editor · selection`, `vim · NORMAL`, `terminal`, `commit`, `diff view`,
+`project tree`, `go to file`, `agents · prompt`, `completion`, `prompt · Find`, …) and the fallback keys when the
+terminal has no kitty protocol. A mouse action with a key (tab click, tree open, wheel, dock tabs) or a fallback
+used where the real key works shows "Tip: key" at its top for 3 s.
 
 ## Keys (project view)
 | Key | Does |
@@ -305,6 +330,7 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
   bracketed paste (Cmd+V / Ctrl+Shift+V), Ctrl+V pastes the editor's own clipboard.
 
 ## Decisions
+`docs/decisions/0008-shortcut-helper.md` – key-hints: glass panel bottom right, 20 contexts, fallbacks by kitty, Alt+/ + `settings.toml`, Key Promoter tips, `table.rs` as the single source with a binding test.
 `docs/decisions/0001-stack-and-keymap.md` – Rust + ratatui, IDEA keys by default, Vim optional, internal tool.
 `docs/decisions/0002-project-view.md` – M2 choices: args, ignore rules, own fuzzy scorer, smart-case find in files, fallback keys.
 `docs/decisions/0003-vim-mode.md` – M4 choices: who gets which key, undo groups, register, `:q` per tab, plain-text search.
@@ -314,6 +340,15 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 `docs/decisions/0007-more-language-servers.md` – languages.toml layers + merge rules, server per language, fallback on a failed start, `also` servers, snippets, pull diagnostics, new keys, what was installed.
 
 ## Current state (2026-10-25)
+Shortcut helper done 2026-10-25 (key-hints, decision 0008, see Keys (shortcut helper)): see-through panel bottom
+right in the editor area, 20 contexts, kitty/legacy key choice, moves to the top right off the cursor line, Alt+/
+toggle saved in `settings.toml` (new `src/config.rs`), `--no-hints`, Key Promoter tips. Tests: 32 unit tests in
+`src/hints/` + `src/config.rs` (one binding test per context feeding every table key into a fresh `App`, checked
+with a mutation: a bogus row fails) and e2e `scenarios/hints.sh` (4 scenarios); the harness now uses a scratch
+config folder for every scenario. Not done yet: a key to list *all* keys of a context (the panel shows the useful
+few), tips for more mouse actions (diff/commit clicks, completion clicks), hints for Vim's `:` commands beyond
+`:w`/`:q`; the helper isn't configurable beyond on/off (M7 settings/palette could add position or
+row choice).
 M1 core editing done (tabs, undo/redo, selection, bracket pairing, smart Enter/Home, duplicate/delete/move line,
 find, go to line, mouse, clipboard). M2–M6 assigned to Aa staff, see `docs/ROADMAP.md`.
 M2 project view done 2026-10-25: tree sidebar, Go to File, Find in Files (whole `~/Projects` in under 1 s),

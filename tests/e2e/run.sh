@@ -49,10 +49,16 @@ fail() {
     exit 1
 }
 
-# start <cols> <rows> [file ...]: run catlas in a new tmux session (cwd = scratch dir), wait for the UI.
+# start <cols> <rows> [arg ...]: run catlas in a new tmux session (cwd = scratch dir), wait for the UI.
+# Settings, agents.json and languages.toml go to $CFG (a scratch config folder, never ~/.config).
+# The shortcut helper starts off there (it would cover the bottom-right of the screen checks);
+# set E2E_HINTS=1 before the first start to get the real default (on).
 start() {
     local cols="$1" rows="$2"; shift 2
-    local cmd="cd '$SCRATCH' && PATH='$SCRATCH/bin:$PATH' exec '$CATLAS'"
+    CFG="$SCRATCH/bin/.catlas-config"
+    mkdir -p "$CFG"
+    [ -n "${E2E_HINTS:-}" ] || [ -f "$CFG/settings.toml" ] || printf 'hints = false\n' > "$CFG/settings.toml"
+    local cmd="cd '$SCRATCH' && CATLAS_CONFIG_DIR='$CFG' PATH='$SCRATCH/bin:$PATH' exec '$CATLAS'"
     local f; for f in "$@"; do cmd="$cmd '$f'"; done
     tm new-session -d -s "$SESSION" -x "$cols" -y "$rows" "$cmd" || fail "tmux new-session failed"
     tm set -t "$SESSION" status off >/dev/null 2>&1

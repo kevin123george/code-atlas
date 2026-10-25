@@ -3,9 +3,11 @@
 
 mod agents;
 mod app;
+mod config;
 mod dock;
 mod doc;
 mod git;
+mod hints;
 mod project;
 mod lsp;
 mod syntax;
@@ -31,8 +33,9 @@ use ratatui::Terminal;
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
-        println!("catlas [--vim] [dir] [file ...]   open a project folder (default: the current one) and files in Code Atlas");
-        println!("  --vim   start in Vim mode (also CATLAS_VIM=1; Ctrl+Alt+V toggles at runtime)");
+        println!("catlas [--vim] [--no-hints] [dir] [file ...]   open a project folder (default: the current one) and files in Code Atlas");
+        println!("  --vim        start in Vim mode (also CATLAS_VIM=1; Ctrl+Alt+V toggles at runtime)");
+        println!("  --no-hints   start without the shortcut helper (Alt+/ toggles it and saves the choice)");
         println!("catlas --health [dir]   which languages have highlighting and which language servers are installed");
         return Ok(());
     }
@@ -47,13 +50,18 @@ fn main() -> Result<()> {
     }
     let env_vim = std::env::var("CATLAS_VIM").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"));
     let vim = env_vim || args.iter().any(|a| a == "--vim");
-    let files = args.into_iter().filter(|a| a != "--vim").map(PathBuf::from).collect();
+    let no_hints = args.iter().any(|a| a == "--no-hints");
+    let files = args.into_iter().filter(|a| a != "--vim" && a != "--no-hints").map(PathBuf::from).collect();
     let mut app = app::App::new(files)?;
     if vim {
         app.set_vim(true);
     }
+    if no_hints {
+        app.hints.on = false; // this run only: the saved choice stays
+    }
 
     let enhanced = setup()?;
+    app.hints.kitty = enhanced;
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = restore(enhanced);

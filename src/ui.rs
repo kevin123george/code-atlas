@@ -20,6 +20,8 @@ pub mod theme {
     pub const MUTED: Color = Color::Rgb(0x5c, 0x65, 0x77);
     pub const GRID: Color = Color::Rgb(0x21, 0x26, 0x36);
     pub const BASELINE: Color = Color::Rgb(0x2b, 0x31, 0x43);
+    /// Text under the see-through shortcut helper (`src/hints/`): a little above the paper.
+    pub const GHOST: Color = Color::Rgb(0x2a, 0x30, 0x40);
     pub const ACCENT: Color = Color::Rgb(0x2c, 0xe0, 0xf5);
     pub const GOOD: Color = Color::Rgb(0x2f, 0xd1, 0x8f);
     pub const CRITICAL: Color = Color::Rgb(0xff, 0x6a, 0x60);
@@ -77,6 +79,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let text_area = crate::project::ui::draw_sidebar(buf, app, text_area);
     let cursor = draw_text(buf, app, text_area).filter(|_| !app.project.focus_tree && !app.agents.focus && !app.dock.has_focus());
     crate::dock::draw_over_editor(buf, app, text_area);
+    crate::hints::ui::draw(buf, app, text_area);
 
     let status = Rect::new(area.x, area.bottom() - 1, area.width, 1);
     let prompt_cursor = draw_status(buf, app, status);

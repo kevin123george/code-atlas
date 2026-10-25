@@ -162,6 +162,12 @@ impl Terminal {
     pub fn scroll_to_bottom(&mut self) {
         self.parser.set_scrollback(0);
     }
+
+    /// Feeds output straight to the emulator (tests: fill the scrollback without a shell).
+    #[cfg(test)]
+    pub fn feed(&mut self, bytes: &[u8]) {
+        self.parser.process(bytes);
+    }
 }
 
 impl Drop for Terminal {

@@ -51,7 +51,7 @@ pub struct App {
     pub quit: bool,
     /// Set by a first Ctrl+Q (or Ctrl+W) on unsaved work; the second press goes through.
     armed: Option<char>,
-    clip: Clip,
+    pub(crate) clip: Clip,
     last_find: String,
     pub layout: Layout,
     /// Tab titles' x ranges from the last draw.
@@ -69,6 +69,8 @@ pub struct App {
     pub agents: crate::agents::Agents,
     /// Bottom dock: terminal, commit panel, git state (`src/dock.rs`, `src/git/`, `src/term/`).
     pub dock: crate::dock::Dock,
+    /// Shortcut helper, bottom right (`src/hints/`).
+    pub hints: crate::hints::Hints,
 }
 
 impl App {
@@ -104,6 +106,7 @@ impl App {
             follow: true,
             vim: None,
             lsp: Default::default(),
+            hints: crate::hints::Hints::load(),
         })
     }
 
@@ -141,6 +144,9 @@ impl App {
     pub fn handle(&mut self, ev: Event) {
         match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => {
+                if self.hints_key(k) {
+                    return; // Alt+/ toggled the shortcut helper
+                }
                 let armed = self.armed.take();
                 let before = self.active;
                 if self.dock_key(k) {
@@ -183,10 +189,12 @@ impl App {
             }
             Event::Mouse(m) => {
                 let before = self.active;
+                let hints_before = self.hints_before();
                 if !self.dock_mouse(m) && !self.agents_mouse(m) && !self.project_mouse(m) {
                     self.mouse(m);
                 }
                 self.after_ide(before);
+                self.hints_mouse(m, hints_before);
             }
             _ => {}
         }
@@ -524,6 +532,9 @@ impl App {
 /// Puts copied text on the system clipboard: pbcopy / wl-copy / xclip when there,
 /// else the OSC 52 escape (works over SSH in most terminals).
 fn set_system_clipboard(text: &str) {
+    if cfg!(test) {
+        return; // unit tests never touch the real clipboard
+    }
     for (cmd, args) in [("pbcopy", &[][..]), ("wl-copy", &[][..]), ("xclip", &["-selection", "clipboard"][..])] {
         if let Ok(mut child) = Command::new(cmd).args(args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
             if let Some(mut stdin) = child.stdin.take() {
