@@ -15,6 +15,8 @@ pub enum PromptKind {
     Find,
     GotoLine,
     SaveAs,
+    /// Shift+F6 (LSP rename).
+    Rename,
 }
 
 pub struct Prompt {
@@ -28,6 +30,7 @@ impl PromptKind {
             PromptKind::Find => "Find",
             PromptKind::GotoLine => "Go to line[:column]",
             PromptKind::SaveAs => "Save as",
+            PromptKind::Rename => "Rename to",
         }
     }
 }
@@ -60,6 +63,8 @@ pub struct App {
     pub project: crate::project::Project,
     /// Vim mode when on (`--vim`, `CATLAS_VIM=1`, Ctrl+Alt+V).
     pub vim: Option<Vim>,
+    /// Language servers, diagnostics and code-smarts popups (M3, `src/lsp/`).
+    pub lsp: crate::lsp::Lsp,
 }
 
 impl App {
@@ -90,6 +95,7 @@ impl App {
             dragging: false,
             follow: true,
             vim: None,
+            lsp: Default::default(),
         })
     }
 
@@ -137,7 +143,10 @@ impl App {
                     self.after_ide(before);
                 } else {
                     self.message = None;
-                    self.key(k, armed);
+                    if !self.smart_key(k) {
+                        self.key(k, armed);
+                        self.smart_after_key(k);
+                    }
                 }
                 self.follow = true;
             }
@@ -347,6 +356,11 @@ impl App {
             KeyCode::Char('a') if ctrl => d.select_all(),
             KeyCode::Char('d') if ctrl => d.duplicate(),
             KeyCode::Char('y') if ctrl => d.delete_lines(),
+            // Ctrl+/ arrives as Ctrl+/ (kitty), Ctrl+7 or Ctrl+_ depending on the terminal.
+            KeyCode::Char('/') | KeyCode::Char('7') | KeyCode::Char('_') if ctrl => match d.syntax.lang.line_comment() {
+                Some(token) => crate::syntax::comment::toggle(d, token),
+                None => self.message = Some(format!("{} has no line comments", d.syntax.lang.name())),
+            },
 
             // Movement (Shift selects)
             KeyCode::Up if alt && shift => d.move_lines(false),
@@ -408,9 +422,10 @@ impl App {
                             None => self.message = Some("Type a line number, like 42 or 42:7".into()),
                         }
                     }
+                    PromptKind::Rename => self.lsp_rename(input),
                     PromptKind::SaveAs => {
                         if !input.trim().is_empty() {
-                            self.doc_mut().path = Some(PathBuf::from(input.trim()));
+                            self.doc_mut().set_path(PathBuf::from(input.trim()));
                             self.save();
                         }
                     }
@@ -426,10 +441,14 @@ impl App {
             self.prompt = Some(Prompt { kind: PromptKind::SaveAs, input: String::new() });
             return;
         }
-        self.message = Some(match d.save() {
+        let saved = d.save();
+        self.message = Some(match &saved {
             Ok(()) => format!("Saved {}", d.name()),
             Err(e) => format!("Couldn't save: {e:#}"),
         });
+        if saved.is_ok() {
+            self.lsp_did_save();
+        }
     }
 
     fn close_tab(&mut self) {
