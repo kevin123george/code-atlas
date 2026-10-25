@@ -1,8 +1,9 @@
 //! Code Atlas: a terminal code editor with IntelliJ-style keys.
-//! Usage: `catlas [file ...]`
+//! Usage: `catlas [dir] [file ...]` (no folder given = the current folder is the project)
 
 mod app;
 mod doc;
+mod project;
 mod ui;
 
 use std::io::{self, stdout};
@@ -23,7 +24,7 @@ use ratatui::Terminal;
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
-        println!("catlas [file ...]   open files in Code Atlas");
+        println!("catlas [dir] [file ...]   open a project folder (default: the current one) and files in Code Atlas");
         return Ok(());
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
@@ -48,6 +49,7 @@ fn run(app: &mut app::App) -> Result<()> {
     let mut term = Terminal::new(CrosstermBackend::new(stdout()))?;
     term.clear()?;
     while !app.quit {
+        app.tick();
         term.draw(|f| ui::draw(f, app))?;
         if event::poll(Duration::from_millis(250))? {
             app.handle(event::read()?);

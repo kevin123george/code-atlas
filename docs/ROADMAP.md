@@ -6,7 +6,7 @@ Own new files freely; touch `app.rs` / `ui.rs` / `main.rs` only with small hooks
 | # | Milestone | Owns | Status |
 |---|---|---|---|
 | M1 | Core editing: tabs, undo/redo, selection, pairing, smart Enter/Home, line ops, find, go to line, mouse, clipboard | `doc.rs`, `app.rs`, `ui.rs` | done 2026-10-25 |
-| M2 | Project view: file tree sidebar (Alt+1), fuzzy file finder (Ctrl+Shift+N, fallback Ctrl+P), find in files (Ctrl+Shift+F), recent files (Ctrl+E), open a folder (`catlas .`) | `src/project/` | in progress |
+| M2 | Project view: file tree sidebar (Alt+1), fuzzy file finder (Ctrl+Shift+N, fallback Ctrl+P), find in files (Ctrl+Shift+F), recent files (Ctrl+E), open a folder (`catlas .`) | `src/project/` | done 2026-10-25 |
 | M3 | Code smarts: tree-sitter highlighting (Rust, TS/JS, Java, Python, JSON, TOML, Markdown, Bash), LSP client (completion Ctrl+Space, go to definition Ctrl+B, hover Ctrl+Q→ F1, diagnostics in gutter, rename Shift+F6, quick fix Alt+Enter, format Ctrl+Alt+L), comment line Ctrl+/ | `src/syntax/`, `src/lsp/` | in progress |
 | M4 | Vim mode: normal/insert/visual, motions, operators, counts, `:w :q`, toggle in settings/command palette | `src/vim/` | in progress |
 | M5 | Git + terminal: changed-line gutter marks, diff view, commit panel (Ctrl+K), terminal pane (Alt+F12) | `src/git/`, `src/term/` | next |

@@ -55,22 +55,29 @@ pub struct App {
     dragging: bool,
     /// Scroll to the cursor at the next draw (keyboard actions do; mouse wheel doesn't).
     pub follow: bool,
+    /// Project view: tree, finder, find in files, recent files (`src/project/`).
+    pub project: crate::project::Project,
 }
 
 impl App {
     pub fn new(paths: Vec<PathBuf>) -> anyhow::Result<Self> {
+        let (root, paths, as_project) = crate::project::split_args(paths);
+        let mut project = crate::project::Project::new(root, as_project);
         let mut docs = Vec::new();
         for p in &paths {
+            project.note_opened(p);
             docs.push(Doc::open(p)?);
         }
         if docs.is_empty() {
             docs.push(Doc::empty());
         }
+        project.focus_tree = as_project && paths.is_empty();
         Ok(App {
+            project,
             docs,
             active: 0,
             prompt: None,
-            message: Some("Ctrl+S save · Ctrl+F find · Ctrl+G line · Alt+←/→ tabs · Ctrl+Q quit".into()),
+            message: Some("Ctrl+S save · Ctrl+P file · Alt+1 project · Alt+F find in files · Ctrl+E recent · Ctrl+Q quit".into()),
             quit: false,
             armed: None,
             clip: Clip::default(),
@@ -96,6 +103,8 @@ impl App {
                 let armed = self.armed.take();
                 if self.prompt.is_some() {
                     self.prompt_key(k);
+                } else if self.project_key(k) {
+                    // Handled by the project view (src/project/).
                 } else {
                     self.message = None;
                     self.key(k, armed);
@@ -105,12 +114,18 @@ impl App {
             Event::Paste(text) => {
                 if let Some(p) = &mut self.prompt {
                     p.input.push_str(text.lines().next().unwrap_or(""));
+                } else if self.project.popup.is_some() {
+                    self.project.paste(&text);
                 } else {
                     self.doc_mut().insert_str(&text);
                     self.follow = true;
                 }
             }
-            Event::Mouse(m) => self.mouse(m),
+            Event::Mouse(m) => {
+                if !self.project_mouse(m) {
+                    self.mouse(m);
+                }
+            }
             _ => {}
         }
     }

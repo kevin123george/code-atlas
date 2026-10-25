@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 crossterm = "0.28"
+ignore = "0.4"
 ratatui = "0.29"
 ropey = "1.6"
 unicode-width = "0.2"
