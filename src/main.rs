@@ -1,10 +1,11 @@
 //! Code Atlas: a terminal code editor with IntelliJ-style keys.
-//! Usage: `catlas [dir] [file ...]` (no folder given = the current folder is the project)
+//! Usage: `catlas [--vim] [dir] [file ...]` (no folder given = the current folder is the project)
 
 mod app;
 mod doc;
 mod project;
 mod ui;
+mod vim;
 
 use std::io::{self, stdout};
 use std::path::PathBuf;
@@ -24,14 +25,21 @@ use ratatui::Terminal;
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
-        println!("catlas [dir] [file ...]   open a project folder (default: the current one) and files in Code Atlas");
+        println!("catlas [--vim] [dir] [file ...]   open a project folder (default: the current one) and files in Code Atlas");
+        println!("  --vim   start in Vim mode (also CATLAS_VIM=1; Ctrl+Alt+V toggles at runtime)");
         return Ok(());
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
         println!("catlas {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    let mut app = app::App::new(args.into_iter().map(PathBuf::from).collect())?;
+    let env_vim = std::env::var("CATLAS_VIM").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"));
+    let vim = env_vim || args.iter().any(|a| a == "--vim");
+    let files = args.into_iter().filter(|a| a != "--vim").map(PathBuf::from).collect();
+    let mut app = app::App::new(files)?;
+    if vim {
+        app.set_vim(true);
+    }
 
     let enhanced = setup()?;
     let hook = std::panic::take_hook();
@@ -48,9 +56,14 @@ fn main() -> Result<()> {
 fn run(app: &mut app::App) -> Result<()> {
     let mut term = Terminal::new(CrosstermBackend::new(stdout()))?;
     term.clear()?;
+    let mut block = false;
     while !app.quit {
         app.tick();
         term.draw(|f| ui::draw(f, app))?;
+        if ui::block_cursor(app) != block {
+            block = !block;
+            execute!(stdout(), if block { SetCursorStyle::SteadyBlock } else { SetCursorStyle::SteadyBar })?;
+        }
         if event::poll(Duration::from_millis(250))? {
             app.handle(event::read()?);
             // Drain queued events (fast typing, pastes) before the next draw.

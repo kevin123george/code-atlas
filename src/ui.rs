@@ -8,6 +8,7 @@ use ratatui::Frame;
 
 use crate::app::{App, Layout};
 use crate::doc::char_width;
+use crate::vim::Mode;
 
 pub mod theme {
     use ratatui::style::Color;
@@ -52,6 +53,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
+/// Block cursor in Vim normal / visual mode, a bar everywhere else (typing, prompts).
+pub fn block_cursor(app: &App) -> bool {
+    app.prompt.is_none()
+        && app.project.popup.is_none()
+        && !app.project.focus_tree
+        && app.vim.as_ref().is_some_and(|v| v.cmdline().is_none() && v.mode != Mode::Insert)
+}
+
 fn draw_tabs(buf: &mut Buffer, app: &mut App, area: Rect) {
     buf.set_style(area, Style::new().bg(SURFACE_1));
     let brand = " ◈ Code Atlas ";
@@ -94,7 +103,7 @@ fn draw_text(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
     app.layout = Layout { text_x, text_y: area.y, text_h: area.height };
 
     let cur_line = d.line();
-    let sel = d.selection();
+    let sel = app.vim.as_ref().and_then(|v| v.visual_range(d)).or(d.selection());
     for row in 0..h {
         let line = d.scroll_line + row;
         let y = area.y + row as u16;
@@ -155,16 +164,36 @@ fn draw_text(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
 fn draw_status(buf: &mut Buffer, app: &App, area: Rect) -> Option<Position> {
     buf.set_style(area, Style::new().bg(SURFACE_2).fg(TEXT_2));
     let d = app.doc();
+    let sel = app.visual_range().or(d.selection());
+    let (mode, mode_style) = match &app.vim {
+        None => ("IDEA".to_string(), Style::new().fg(TEXT_2).bg(SURFACE_2)),
+        Some(v) => {
+            let bg = match v.mode {
+                Mode::Normal => ACCENT,
+                Mode::Insert => GOOD,
+                Mode::Visual | Mode::VisualLine => WARNING,
+            };
+            (v.mode.label().to_string(), Style::new().fg(PAPER).bg(bg).add_modifier(Modifier::BOLD))
+        }
+    };
+    let pending = app.vim.as_ref().map(|v| v.pending()).filter(|p| !p.is_empty()).map(|p| format!("{p}  ")).unwrap_or_default();
     let right = format!(
-        " Ln {}, Col {}{} · {} · UTF-8 · IDEA ",
+        " {pending}Ln {}, Col {}{} · {} · UTF-8 · ",
         d.line() + 1,
         d.col() + 1,
-        d.selection().map(|(s, e)| format!(" ({} chars)", e - s)).unwrap_or_default(),
+        sel.map(|(s, e)| format!(" ({} chars)", e - s)).unwrap_or_default(),
         if d.crlf { "CRLF" } else { "LF" },
     );
-    let rw = right.chars().count() as u16;
+    let badge = format!(" {mode} ");
+    let rw = (right.chars().count() + badge.chars().count()) as u16;
     if rw < area.width {
-        buf.set_string(area.right() - rw, area.y, &right, Style::new().fg(TEXT_2).bg(SURFACE_2));
+        let x = area.right() - rw;
+        buf.set_string(x, area.y, &right, Style::new().fg(TEXT_2).bg(SURFACE_2));
+        buf.set_string(x + right.chars().count() as u16, area.y, &badge, mode_style);
+    }
+    if let Some(line) = app.vim.as_ref().and_then(|v| v.cmdline()) {
+        buf.set_string(area.x, area.y, &line, Style::new().fg(TEXT).bg(SURFACE_2));
+        return Some(Position::new((area.x + line.chars().count() as u16).min(area.right() - 1), area.y));
     }
     if let Some(p) = &app.prompt {
         let label = format!(" {}: ", p.kind.label());
@@ -174,7 +203,8 @@ fn draw_status(buf: &mut Buffer, app: &App, area: Rect) -> Option<Position> {
         return Some(Position::new((x + p.input.chars().count() as u16).min(area.right() - 1), area.y));
     }
     let (text, color) = match &app.message {
-        Some(m) if m.starts_with("Couldn't") || m.starts_with("Not found") => (m.clone(), CRITICAL),
+        Some(m) if m.starts_with("Couldn't") || m.starts_with("Not found") || is_vim_error(m) => (m.clone(), CRITICAL),
+        Some(m) if m.starts_with("search hit") => (m.clone(), WARNING),
         Some(m) if m.contains("not saved") || m.contains("Not saved") => (m.clone(), WARNING),
         Some(m) if m.starts_with("Saved") => (m.clone(), GOOD),
         Some(m) => (m.clone(), TEXT_2),
@@ -184,4 +214,10 @@ fn draw_status(buf: &mut Buffer, app: &App, area: Rect) -> Option<Position> {
     let text: String = text.chars().take(max).collect();
     buf.set_string(area.x + 1, area.y, text, Style::new().fg(color).bg(SURFACE_2));
     None
+}
+
+/// Vim error messages start with an E number ("E37: No write since last change").
+fn is_vim_error(m: &str) -> bool {
+    let mut c = m.chars();
+    c.next() == Some('E') && c.next().is_some_and(|c| c.is_ascii_digit())
 }

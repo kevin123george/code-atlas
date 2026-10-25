@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::doc::{Clip, Doc};
+use crate::vim::{self, Vim};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
@@ -57,6 +58,8 @@ pub struct App {
     pub follow: bool,
     /// Project view: tree, finder, find in files, recent files (`src/project/`).
     pub project: crate::project::Project,
+    /// Vim mode when on (`--vim`, `CATLAS_VIM=1`, Ctrl+Alt+V).
+    pub vim: Option<Vim>,
 }
 
 impl App {
@@ -86,7 +89,31 @@ impl App {
             tab_spans: Vec::new(),
             dragging: false,
             follow: true,
+            vim: None,
         })
+    }
+
+    /// Turns Vim mode on or off.
+    pub fn set_vim(&mut self, on: bool) {
+        let d = &mut self.docs[self.active];
+        match (on, self.vim.take()) {
+            (true, v) => {
+                let mut v = v.unwrap_or_default();
+                v.fix(d);
+                self.vim = Some(v);
+                self.message = Some("Vim mode · :w save · :q quit · Ctrl+Alt+V back to IDEA keys".into());
+            }
+            (false, Some(mut v)) => {
+                v.leave(d);
+                self.message = Some("IDEA keys · Ctrl+Alt+V for Vim mode".into());
+            }
+            (false, None) => {}
+        }
+    }
+
+    /// The Vim visual selection, for drawing.
+    pub fn visual_range(&self) -> Option<(usize, usize)> {
+        self.vim.as_ref().and_then(|v| v.visual_range(self.doc()))
     }
 
     pub fn doc(&self) -> &Doc {
@@ -101,10 +128,13 @@ impl App {
         match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => {
                 let armed = self.armed.take();
+                let before = self.active;
                 if self.prompt.is_some() {
                     self.prompt_key(k);
+                    self.after_ide(before);
                 } else if self.project_key(k) {
                     // Handled by the project view (src/project/).
+                    self.after_ide(before);
                 } else {
                     self.message = None;
                     self.key(k, armed);
@@ -112,6 +142,9 @@ impl App {
                 self.follow = true;
             }
             Event::Paste(text) => {
+                if self.vim.as_mut().is_some_and(|v| v.paste(&text)) {
+                    return;
+                }
                 if let Some(p) = &mut self.prompt {
                     p.input.push_str(text.lines().next().unwrap_or(""));
                 } else if self.project.popup.is_some() {
@@ -119,18 +152,127 @@ impl App {
                 } else {
                     self.doc_mut().insert_str(&text);
                     self.follow = true;
+                    self.after_ide(self.active);
                 }
             }
             Event::Mouse(m) => {
+                let before = self.active;
                 if !self.project_mouse(m) {
                     self.mouse(m);
                 }
+                self.after_ide(before);
             }
             _ => {}
         }
     }
 
+    /// Keys go to Vim first when it is on; IDEA chords (Ctrl/Alt) and whatever Vim passes on go
+    /// to the IDEA key map, as in IdeaVim.
     fn key(&mut self, k: KeyEvent, armed: Option<char>) {
+        let ctrl_alt = k.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        if ctrl_alt && matches!(k.code, KeyCode::Char('v') | KeyCode::Char('V')) {
+            self.set_vim(self.vim.is_none());
+            return;
+        }
+        let before = self.active;
+        if let Some(v) = &mut self.vim {
+            let d = &mut self.docs[self.active];
+            if v.wants(&k) {
+                match v.handle(d, &mut self.clip, &k) {
+                    vim::Effect::Pass => {}
+                    eff => return self.vim_effect(eff),
+                }
+            }
+            v.before_ide(&mut self.docs[self.active]);
+        }
+        self.idea_key(k, armed);
+        self.after_ide(before);
+    }
+
+    /// Lets Vim catch up with what the IDEA side did (selection → visual mode, tab switches).
+    fn after_ide(&mut self, before: usize) {
+        let Some(v) = &mut self.vim else { return };
+        if self.active != before {
+            if let Some(d) = self.docs.get_mut(before) {
+                v.leave(d);
+            }
+        }
+        v.after_ide(&mut self.docs[self.active]);
+    }
+
+    fn vim_effect(&mut self, eff: vim::Effect) {
+        use vim::Effect as E;
+        match eff {
+            E::None | E::Pass => {}
+            E::Message(m) => self.message = Some(m),
+            E::Yank(text) => set_system_clipboard(&text),
+            E::Save(path) => {
+                if let Some(p) = path {
+                    self.doc_mut().path = Some(PathBuf::from(p));
+                }
+                self.save();
+            }
+            E::Close { save, force, path } => {
+                if save {
+                    if let Some(p) = path {
+                        self.doc_mut().path = Some(PathBuf::from(p));
+                    }
+                    if self.doc().path.is_none() {
+                        self.message = Some("E32: No file name".into());
+                        return;
+                    }
+                    if self.doc().dirty() {
+                        self.save();
+                    }
+                    if self.doc().dirty() {
+                        return;
+                    }
+                }
+                if !force && self.doc().dirty() {
+                    self.message = Some("E37: No write since last change (add ! to override)".into());
+                } else if self.docs.len() == 1 {
+                    self.quit = true;
+                } else {
+                    self.close_tab();
+                }
+            }
+            E::SaveAll => {
+                let mut saved = 0;
+                for d in self.docs.iter_mut().filter(|d| d.dirty() && d.path.is_some()) {
+                    match d.save() {
+                        Ok(()) => saved += 1,
+                        Err(e) => {
+                            self.message = Some(format!("Couldn't save: {e:#}"));
+                            return;
+                        }
+                    }
+                }
+                self.message = Some(format!("Saved {saved} file(s)"));
+            }
+            E::QuitAll { save, force } => {
+                if save {
+                    for d in self.docs.iter_mut().filter(|d| d.dirty() && d.path.is_some()) {
+                        if let Err(e) = d.save() {
+                            self.message = Some(format!("Couldn't save: {e:#}"));
+                            return;
+                        }
+                    }
+                }
+                let unsaved = self.docs.iter().filter(|d| d.dirty()).count();
+                if unsaved > 0 && !force {
+                    self.message = Some(format!("E37: {unsaved} file(s) not saved (add ! to override)"));
+                } else {
+                    self.quit = true;
+                }
+            }
+            E::Open(p) => self.open_target(crate::project::Target { path: PathBuf::from(p), at: None }),
+        }
+        if let Some(v) = &mut self.vim {
+            v.fix(&mut self.docs[self.active]);
+        }
+    }
+
+    fn idea_key(&mut self, k: KeyEvent, armed: Option<char>) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         let alt = k.modifiers.contains(KeyModifiers::ALT);

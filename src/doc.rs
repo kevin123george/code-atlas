@@ -54,6 +54,8 @@ pub struct Doc {
     rev: u64,
     next_rev: u64,
     saved_rev: u64,
+    /// An open undo group (`Some(pushed)`): every edit until `end_group` is one undo step.
+    group: Option<bool>,
 }
 
 impl Doc {
@@ -95,6 +97,7 @@ impl Doc {
             rev: 0,
             next_rev: 1,
             saved_rev: 0,
+            group: None,
         }
     }
 
@@ -352,6 +355,11 @@ impl Doc {
         self.last_edit = EditKind::None;
     }
 
+    /// Sets the display column kept by up/down moves (`usize::MAX` = end of line).
+    pub fn set_want_col(&mut self, col: Option<usize>) {
+        self.want_col = col;
+    }
+
     pub fn goto_line(&mut self, line: usize, col: usize) {
         let line = line.min(self.visible_lines() - 1);
         let col = col.min(self.line_len(line));
@@ -362,7 +370,15 @@ impl Doc {
 
     /// Records the state before an edit. Runs of typing (or deleting) form one undo step.
     fn begin(&mut self, kind: EditKind) {
-        if kind == EditKind::Other || kind != self.last_edit {
+        let push = match self.group {
+            Some(true) => false,
+            Some(false) => {
+                self.group = Some(true);
+                true
+            }
+            None => kind == EditKind::Other || kind != self.last_edit,
+        };
+        if push {
             self.undo.push(Snapshot { rope: self.rope.clone(), cursor: self.cursor, anchor: self.anchor, rev: self.rev });
             if self.undo.len() > 1000 {
                 self.undo.remove(0);
@@ -386,7 +402,23 @@ impl Doc {
         current
     }
 
+    /// Starts an undo group: all edits until `end_group` undo as one step (Vim commands, an
+    /// insert session). Nothing is recorded if no edit happens.
+    pub fn begin_group(&mut self) {
+        if self.group.is_none() {
+            self.group = Some(false);
+        }
+    }
+
+    pub fn end_group(&mut self) {
+        self.group = None;
+        self.last_edit = EditKind::None;
+    }
+
     pub fn undo(&mut self) -> bool {
+        if self.group.is_some() {
+            self.group = Some(false);
+        }
         match self.undo.pop() {
             Some(s) => {
                 let cur = self.restore(s);
@@ -398,6 +430,9 @@ impl Doc {
     }
 
     pub fn redo(&mut self) -> bool {
+        if self.group.is_some() {
+            self.group = Some(false);
+        }
         match self.redo.pop() {
             Some(s) => {
                 let cur = self.restore(s);
@@ -567,6 +602,29 @@ impl Doc {
         } else {
             self.insert_raw(&format!("{eol}{indent}"));
         }
+    }
+
+    /// Replaces `[s, e)` with `text` (line breaks adapted to the file) as one edit and puts the
+    /// cursor after it. Returns the inserted length in chars. Used by the Vim engine.
+    pub fn replace(&mut self, s: usize, e: usize, text: &str) -> usize {
+        let len = self.rope.len_chars();
+        let (s, e) = (s.min(len), e.min(len));
+        if s == e && text.is_empty() {
+            return 0;
+        }
+        self.begin(EditKind::Other);
+        self.anchor = None;
+        self.rope.remove(s..e);
+        let text = normalize_eol(text, self.eol());
+        self.rope.insert(s, &text);
+        let n = text.chars().count();
+        self.cursor = s + n;
+        n
+    }
+
+    /// Indents (or outdents) lines `a..=b` by one step.
+    pub fn indent(&mut self, a: usize, b: usize, add: bool) {
+        self.indent_lines(a, b, add);
     }
 
     /// Tab indents the selected lines, or inserts spaces up to the next tab stop.
