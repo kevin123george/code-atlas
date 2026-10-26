@@ -107,6 +107,7 @@ pub fn context(app: &App) -> Ctx {
             PopupKind::Files => Ctx::GotoFile,
             PopupKind::Recent => Ctx::Recent,
             PopupKind::Search => Ctx::FindInFiles,
+            PopupKind::Quick => Ctx::QuickSearch,
         };
     }
     if app.agents.visible && app.agents.focus {
@@ -117,7 +118,7 @@ pub fn context(app: &App) -> Ctx {
         };
     }
     if app.project.focus_tree && app.project.sidebar {
-        return Ctx::Tree;
+        return if app.project.tree.speed.is_empty() { Ctx::Tree } else { Ctx::TreeSearch };
     }
     match &app.lsp.popup {
         Some(Popup::Completion { .. }) => return Ctx::Completion,
@@ -305,7 +306,16 @@ impl App {
             let ctx = context(self);
             let editorish = matches!(
                 ctx,
-                Ctx::Idea | Ctx::Selection | Ctx::VimNormal | Ctx::VimInsert | Ctx::VimVisual | Ctx::Tree | Ctx::GotoFile | Ctx::Recent | Ctx::FindInFiles
+                Ctx::Idea
+                    | Ctx::Selection
+                    | Ctx::VimNormal
+                    | Ctx::VimInsert
+                    | Ctx::VimVisual
+                    | Ctx::Tree
+                    | Ctx::GotoFile
+                    | Ctx::Recent
+                    | Ctx::FindInFiles
+                    | Ctx::QuickSearch
             );
             if editorish {
                 if let Some(h) = table::FALLBACKS.iter().find(|h| h.legacy.is_some_and(|l| matches(l, &k))) {

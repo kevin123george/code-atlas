@@ -40,6 +40,8 @@ pub struct Tree {
     pub scroll: usize,
     /// Keep the selected row in view at the next draw (keyboard moves do, the wheel doesn't).
     pub follow: bool,
+    /// Speed search: letters typed in the focused tree (IDEA's speed search); empty = off.
+    pub speed: String,
 }
 
 /// The children of `dir`: folders first, then files, each sorted case-insensitively.
@@ -67,6 +69,7 @@ impl Tree {
             selected: 0,
             scroll: 0,
             follow: true,
+            speed: String::new(),
         };
         t.expand(0);
         t
@@ -179,6 +182,51 @@ impl Tree {
         }
     }
 
+    /// Speed search: the char positions in row `i`'s name that match the typed letters (the
+    /// finder's fuzzy rule), `None` when it doesn't match or no search is on.
+    pub fn speed_match(&self, i: usize) -> Option<Vec<usize>> {
+        if self.speed.is_empty() {
+            return None;
+        }
+        super::fuzzy::score(&self.speed, &self.rows.get(i)?.name).map(|(_, pos)| pos)
+    }
+
+    /// Selects the open row whose name matches the speed search best (ties: the first one from
+    /// the selection down, wrapping). Returns false when no row matches.
+    pub fn speed_jump(&mut self) -> bool {
+        let n = self.rows.len();
+        let mut best: Option<(i32, usize)> = None;
+        for k in 0..n {
+            let i = (self.selected + k) % n;
+            if let Some((s, _)) = super::fuzzy::score(&self.speed, &self.rows[i].name) {
+                if best.map_or(true, |(b, _)| s > b) {
+                    best = Some((s, i));
+                }
+            }
+        }
+        match best {
+            Some((_, i)) => {
+                self.selected = i;
+                self.follow = true;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// ↑ / ↓ during a speed search: the previous / next matching row (wrapping).
+    pub fn speed_step(&mut self, down: bool) {
+        let n = self.rows.len();
+        for k in 1..n {
+            let i = if down { (self.selected + k) % n } else { (self.selected + n - k) % n };
+            if self.speed_match(i).is_some() {
+                self.selected = i;
+                self.follow = true;
+                return;
+            }
+        }
+    }
+
     /// Scroll so the selection is visible in `h` rows.
     pub fn keep_visible(&mut self, h: usize) {
         if h == 0 {
@@ -282,6 +330,33 @@ pub mod tests {
         assert_eq!(t.selected_node().unwrap().name, "deep.rs");
         assert_eq!(t.selected_node().unwrap().depth, 3);
         assert!(!t.reveal(&root.join("target/debug/out.rs")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn speed_search_picks_the_best_name_and_steps_through_matches() {
+        let root = sample();
+        let mut t = Tree::new(&root);
+        t.expand(2); // src
+        t.speed = "main".into();
+        assert!(t.speed_jump());
+        assert_eq!(t.selected_node().unwrap().name, "main.rs");
+        assert_eq!(t.speed_match(t.selected), Some(vec![0, 1, 2, 3]));
+        t.speed = "rs".into();
+        t.selected = 0;
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            t.speed_step(true);
+            seen.push(t.selected_node().unwrap().name.clone());
+        }
+        assert_eq!(seen, vec!["lib.rs", "main.rs", "lib.rs"], "wraps, skips rows that don't match");
+        t.speed_step(false);
+        assert_eq!(t.selected_node().unwrap().name, "main.rs");
+        t.speed = "zzz".into();
+        assert!(!t.speed_jump());
+        assert_eq!(t.speed_match(0), None);
+        t.speed.clear();
+        assert_eq!(t.speed_match(0), None, "no search, no highlight");
         fs::remove_dir_all(root).unwrap();
     }
 

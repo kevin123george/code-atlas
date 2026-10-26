@@ -1,10 +1,12 @@
 //! Project view (M2): the file tree sidebar (Alt+1), the file finder (Ctrl+Shift+N / Ctrl+P),
-//! find in files (Ctrl+Shift+F / Alt+F) and recent files (Ctrl+E).
+//! find in files (Ctrl+Shift+F / Alt+F), recent files (Ctrl+E), and Search Everywhere (Alt+S /
+//! Alt+Space: file names and contents at once, with the tree following along; `quick.rs`).
 //!
 //! `App` keeps one [`Project`]; the hooks in `app.rs` hand it keys, mouse events and ticks first,
 //! and it answers with an [`Outcome`]. Opening files goes through [`App::open_target`].
 
 pub mod fuzzy;
+pub mod quick;
 pub mod search;
 pub mod tree;
 pub mod ui;
@@ -46,6 +48,8 @@ pub enum PopupKind {
     Files,
     Recent,
     Search,
+    /// Search Everywhere: file names and contents (`quick.rs`).
+    Quick,
 }
 
 impl PopupKind {
@@ -54,6 +58,7 @@ impl PopupKind {
             PopupKind::Files => "Find File",
             PopupKind::Recent => "Recent Files",
             PopupKind::Search => "Find in Files",
+            PopupKind::Quick => "Search Everywhere",
         }
     }
 }
@@ -94,6 +99,16 @@ pub struct Project {
     search_due: Option<Instant>,
     /// Last search popup input, kept when it's closed (IDEA remembers it too).
     last_search: String,
+    /// The folder (relative) the current hits were searched in; `None` = the whole project.
+    search_scope: Option<String>,
+
+    /// Search Everywhere's tab and scope.
+    pub quick: quick::Quick,
+    /// The tree before a popup started following its selection, and what it follows now.
+    tree_snap: Option<quick::TreeSnap>,
+    followed: Option<PathBuf>,
+    /// Search Everywhere: the item index of each list row from the last draw (`None` = header).
+    pub row_items: Vec<Option<usize>>,
 
     /// Screen areas from the last draw (mouse).
     pub sidebar_rect: Rect,
@@ -155,6 +170,11 @@ impl Project {
             searched: String::new(),
             search_due: None,
             last_search: String::new(),
+            search_scope: None,
+            quick: quick::Quick::default(),
+            tree_snap: None,
+            followed: None,
+            row_items: Vec::new(),
             sidebar_rect: Rect::default(),
             list_rect: Rect::default(),
             popup_rect: Rect::default(),
@@ -216,9 +236,20 @@ impl Project {
         if self.matches_stale && self.popup.as_ref().is_some_and(|p| p.kind != PopupKind::Search) {
             self.refilter();
         }
+        self.follow_tree();
     }
 
-    fn push_hits(&mut self, batch: Vec<Hit>) {
+    fn push_hits(&mut self, mut batch: Vec<Hit>) {
+        // A scoped search walks the folder: paths come relative to it.
+        if let Some(s) = &self.search_scope {
+            for h in &mut batch {
+                h.path = format!("{s}/{}", h.path);
+            }
+        }
+        // Search Everywhere lists each line once (its first match); Find in Files every match.
+        if self.popup.as_ref().is_some_and(|p| p.kind == PopupKind::Quick) {
+            batch.dedup_by(|b, a| a.line == b.line);
+        }
         let room = search::MAX_HITS.saturating_sub(self.hits.len());
         if room > 0 && !batch.is_empty() {
             self.hit_files += 1;
@@ -235,8 +266,11 @@ impl Project {
             p.selected = 0;
             p.scroll = 0;
         }
+        let scope = self.popup.as_ref().filter(|p| p.kind == PopupKind::Quick).and(self.quick.scope.clone());
+        let dir = scope.as_ref().map_or_else(|| self.root.clone(), |s| self.root.join(s));
+        self.search_scope = scope;
         // Dropping the old job cancels it.
-        self.search = (q.chars().count() >= 2).then(|| search::find_in_files(self.root.clone(), q));
+        self.search = (q.trim().chars().count() >= 2).then(|| search::find_in_files(dir, q));
     }
 
     /// Recomputes the finder / recent rows for the current input.
@@ -251,6 +285,9 @@ impl Project {
             _ if q.is_empty() => Box::new(recent.iter().filter(|r| !r.starts_with('/'))),
             _ => Box::new(self.files.iter()),
         };
+        // Search Everywhere started from a tree folder only looks inside it.
+        let scope = self.quick.scope.as_deref().filter(|_| p.kind == PopupKind::Quick);
+        let pool = pool.filter(|path| scope.map_or(true, |s| quick::in_scope(path, s)));
         for path in pool {
             if let Some((s, pos)) = fuzzy::score(q, path) {
                 scored.push((s, Match { path: path.clone(), pos }));
@@ -275,9 +312,22 @@ impl Project {
         }
         let input = match kind {
             PopupKind::Search => seed.unwrap_or_else(|| self.last_search.clone()),
+            PopupKind::Quick => seed.unwrap_or_default(),
             _ => String::new(),
         };
-        let research = kind == PopupKind::Search && input != self.searched;
+        let research = match kind {
+            PopupKind::Search => input != self.searched || self.search_scope.is_some(),
+            // Its hits may be Find in Files' (other query or scope): always fresh.
+            PopupKind::Quick => true,
+            _ => false,
+        };
+        if kind == PopupKind::Quick {
+            self.hits.clear();
+            self.hit_files = 0;
+            self.search = None;
+            self.searched = String::new();
+        }
+        self.snap_tree();
         self.popup = Some(Popup { kind, input, selected: 0, scroll: 0 });
         if research {
             self.search_due = Some(Instant::now().checked_sub(SEARCH_DEBOUNCE).unwrap_or_else(Instant::now));
@@ -290,6 +340,7 @@ impl Project {
                 p.selected = 1;
             }
         }
+        self.follow_tree();
     }
 
     fn refilter_if_list(&mut self) {
@@ -298,7 +349,19 @@ impl Project {
         }
     }
 
+    /// Closes the popup; a tree that followed its selection goes back to how it was.
     pub fn close_popup(&mut self) {
+        self.end_follow(true);
+        self.take_popup();
+    }
+
+    /// Closes the popup after opening / revealing its row: the tree keeps showing that file.
+    pub fn close_popup_keep(&mut self) {
+        self.end_follow(false);
+        self.take_popup();
+    }
+
+    fn take_popup(&mut self) {
         if let Some(p) = self.popup.take() {
             if p.kind == PopupKind::Search {
                 self.last_search = p.input;
@@ -308,6 +371,7 @@ impl Project {
 
     pub fn popup_len(&self) -> usize {
         match &self.popup {
+            Some(p) if p.kind == PopupKind::Quick => self.quick_items().len(),
             Some(p) if p.kind == PopupKind::Search => self.hits.len(),
             Some(_) => self.matches.len(),
             None => 0,
@@ -318,10 +382,13 @@ impl Project {
         let Some(p) = &mut self.popup else { return };
         p.selected = 0;
         p.scroll = 0;
-        if p.kind == PopupKind::Search {
-            self.search_due = Some(Instant::now());
-        } else {
-            self.refilter();
+        match p.kind {
+            PopupKind::Search => self.search_due = Some(Instant::now()),
+            PopupKind::Quick => {
+                self.search_due = Some(Instant::now());
+                self.refilter();
+            }
+            _ => self.refilter(),
         }
     }
 
@@ -333,13 +400,11 @@ impl Project {
     }
 
     /// The selected popup row as a file to open.
-    fn popup_target(&self) -> Option<Target> {
+    pub fn popup_target(&self) -> Option<Target> {
         let p = self.popup.as_ref()?;
         match p.kind {
-            PopupKind::Search => {
-                let h = self.hits.get(p.selected)?;
-                Some(Target { path: self.root.join(&h.path), at: Some((h.line, h.start, h.end - h.start)) })
-            }
+            PopupKind::Quick => self.quick_target(),
+            PopupKind::Search => Some(quick::hit_target(&self.root, self.hits.get(p.selected)?)),
             _ => {
                 let m = self.matches.get(p.selected)?;
                 let at = split_line_suffix(p.input.trim()).1.map(|(l, c)| (l.saturating_sub(1), c.saturating_sub(1), 0));
@@ -372,12 +437,39 @@ impl Project {
             self.open_popup(PopupKind::Files, None);
             return Some(Outcome::Handled);
         }
+        // Search Everywhere (IDEA's Shift Shift can't arrive in a terminal): Ctrl+T, which every
+        // terminal sends (Terminal.app and iTerm2 without setup); Alt+S / Alt+Space where Option
+        // is Meta; and the no-break space a Mac types for Option+Space without that setting.
+        // From the focused tree it searches the selected folder; pressed again in the popup it
+        // widens to the whole project; from another popup it takes that popup's input along.
+        if is_quick_key(&k) {
+            match self.popup.as_ref().map(|p| (p.kind, p.input.clone())) {
+                Some((PopupKind::Quick, _)) => self.widen_quick(),
+                Some((_, input)) => {
+                    self.close_popup();
+                    self.open_quick(Some(input), None);
+                }
+                None => {
+                    let in_tree = self.focus_tree && self.sidebar;
+                    let scope = if in_tree { self.tree_scope() } else { None };
+                    let seed = selected_text.filter(|s| !s.is_empty() && !s.contains('\n') && !in_tree);
+                    self.tree.speed.clear();
+                    self.open_quick(seed, scope);
+                }
+            }
+            return Some(Outcome::Handled);
+        }
         if (ctrl && shift && ch('f')) || (alt && !ctrl && ch('f')) {
             let seed = selected_text.filter(|s| !s.is_empty() && !s.contains('\n'));
             self.open_popup(PopupKind::Search, seed);
             return Some(Outcome::Handled);
         }
-        // Alt+F1: select the current file in the project view (IDEA's "Select In", straight to it).
+        // Alt+F1: select the current file in the project view (IDEA's "Select In", straight to it);
+        // in a popup, its selected row.
+        if alt && k.code == KeyCode::F(1) && self.popup_target().is_some() {
+            self.reveal_selected();
+            return Some(Outcome::Handled);
+        }
         if alt && k.code == KeyCode::F(1) {
             self.close_popup();
             if let Some(path) = current_file {
@@ -391,7 +483,9 @@ impl Project {
             return Some(Outcome::Handled);
         }
         if self.popup.is_some() {
-            return Some(self.popup_key(k));
+            let out = self.popup_key(k);
+            self.follow_tree();
+            return Some(out);
         }
         if self.focus_tree && self.sidebar {
             return self.tree_key(k);
@@ -412,10 +506,16 @@ impl Project {
             KeyCode::Esc => self.close_popup(),
             KeyCode::Enter => {
                 if let Some(t) = self.popup_target() {
-                    self.close_popup();
+                    self.close_popup_keep();
                     return Outcome::Open(t);
                 }
             }
+            KeyCode::Tab | KeyCode::BackTab if p.kind == PopupKind::Quick => {
+                self.quick.mode = self.quick.mode.next(k.code == KeyCode::BackTab);
+                p.selected = 0;
+                p.scroll = 0;
+            }
+            KeyCode::Backspace if p.kind == PopupKind::Quick && p.input.is_empty() => self.widen_quick(),
             KeyCode::Up => step(p, -1),
             KeyCode::Down => step(p, 1),
             KeyCode::PageUp => step(p, -10),
@@ -447,6 +547,40 @@ impl Project {
     }
 
     fn tree_key(&mut self, k: KeyEvent) -> Option<Outcome> {
+        let plain = !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        // Speed search: typing in the tree jumps to matching names; ↑↓ step through the matches,
+        // Backspace narrows back, Esc clears. The tree's other keys (and chords) end it and do
+        // their usual thing; keys the tree doesn't use leave it alone.
+        if !self.tree.speed.is_empty() {
+            match k.code {
+                KeyCode::Esc => {
+                    self.tree.speed.clear();
+                    return Some(Outcome::Handled);
+                }
+                KeyCode::Backspace => {
+                    self.speed_back();
+                    return Some(Outcome::Handled);
+                }
+                KeyCode::Up | KeyCode::Down => {
+                    self.tree.speed_step(k.code == KeyCode::Down);
+                    return Some(Outcome::Handled);
+                }
+                KeyCode::Char(c) if plain => {
+                    self.speed_type(c);
+                    return Some(Outcome::Handled);
+                }
+                KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Enter | KeyCode::F(4) => {
+                    self.tree.speed.clear()
+                }
+                _ if !plain => self.tree.speed.clear(),
+                _ => return Some(Outcome::Handled),
+            }
+        } else if let KeyCode::Char(c) = k.code {
+            if plain && c != ' ' {
+                self.speed_type(c);
+                return Some(Outcome::Handled);
+            }
+        }
         let t = &mut self.tree;
         let page = self.sidebar_rect.height.saturating_sub(2).max(1) as isize;
         match k.code {
@@ -489,12 +623,14 @@ impl Project {
                 }
                 MouseEventKind::Down(MouseButton::Left) if inside(l) => {
                     let len = self.popup_len();
-                    let p = self.popup.as_mut()?;
-                    let i = p.scroll + (m.row - l.y) as usize;
+                    let quick = self.popup.as_ref().is_some_and(|p| p.kind == PopupKind::Quick);
+                    let row = (m.row - l.y) as usize;
+                    // Search Everywhere has section headers between the rows.
+                    let i = if quick { self.row_items.get(row).copied().flatten().unwrap_or(usize::MAX) } else { self.popup.as_ref()?.scroll + row };
                     if i < len {
-                        p.selected = i;
+                        self.popup.as_mut()?.selected = i;
                         let t = self.popup_target()?;
-                        self.close_popup();
+                        self.close_popup_keep();
                         return Some(Outcome::Open(t));
                     }
                 }
@@ -523,6 +659,7 @@ impl Project {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 self.focus_tree = true;
+                self.tree.speed.clear();
                 if m.row < rows_y {
                     return Some(Outcome::Handled);
                 }
@@ -539,6 +676,20 @@ impl Project {
             _ => {}
         }
         Some(Outcome::Handled)
+    }
+}
+
+/// Search Everywhere's keys: Ctrl+T, Alt+S, Alt+Space, or U+00A0 (macOS Option+Space when Option
+/// isn't Meta).
+pub fn is_quick_key(k: &KeyEvent) -> bool {
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+    let alt = k.modifiers.contains(KeyModifiers::ALT);
+    match k.code {
+        KeyCode::Char('t') | KeyCode::Char('T') => ctrl && !alt && !shift,
+        KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Char(' ') => alt && !ctrl,
+        KeyCode::Char('\u{a0}') => !ctrl && !alt,
+        _ => false,
     }
 }
 
@@ -585,8 +736,12 @@ impl App {
     fn project_outcome(&mut self, o: Outcome) {
         match o {
             Outcome::Handled => {
-                if self.project.focus_tree {
-                    self.message = Some("Project: ↑↓ move · →← unfold/fold · Enter open · Esc editor · Alt+1 hide".into());
+                if self.project.popup.is_some() {
+                    self.message = None;
+                } else if self.project.focus_tree && !self.project.tree.speed.is_empty() {
+                    self.message = Some("Speed search: ↑↓ next match · Enter open · Backspace · Esc clear".into());
+                } else if self.project.focus_tree {
+                    self.message = Some("Project: ↑↓ move · →← fold · Enter open · type to search · Ctrl+T search in folder · Esc editor".into());
                 }
             }
             Outcome::Open(t) => self.open_target(t),

@@ -63,7 +63,8 @@ yaml-language-server; TOML taplo; Markdown marksman; Dockerfile docker-langserve
 - `src/app.rs` – tabs, clipboard, prompts (find, go to line, save as), IDEA key map, mouse.
 - `src/ui.rs` – drawing (tab bar, gutter, text, status bar) and the `theme` colours (Ledger Terminal dark tokens).
 - `src/project/` – project view (M2): `mod.rs` state, keys, mouse, `App::open_target` / `tick` glue; `tree.rs`
-  sidebar tree (flat row list, lazy listing, `walker()` = the ignore rules); `fuzzy.rs` file-name scorer;
+  sidebar tree (flat row list, lazy listing, `walker()` = the ignore rules, speed search `speed_*`); `fuzzy.rs` file-name scorer;
+  `quick.rs` Search Everywhere (tabs, sections, scope, tree follow + snapshot, speed-search glue);
   `search.rs` background file index + find in files (threads, channels, cancel on drop); `ui.rs` sidebar + popups.
   Hooks elsewhere: `App.project`, `project_key`/`project_mouse` calls in `App::handle`, `draw_sidebar`/`draw_popup`
   in `ui::draw`, `app.tick()` in the main loop.
@@ -110,7 +111,7 @@ yaml-language-server; TOML taplo; Markdown marksman; Dockerfile docker-langserve
   `draw_branch` (status bar) and `!app.dock.has_focus()` (cursor, `block_cursor`) in `ui.rs`; `tree_color` in
   `project/ui.rs`.
 - `src/hints/` – shortcut helper (key-hints, decision 0008): `mod.rs` `Hints` state (on, kitty, tip), `context()`
-  (what has focus → one of 20 `Ctx`), the key-label parser, Key Promoter (`hints_key`, `hints_mouse`); `table.rs`
+  (what has focus → one of 22 `Ctx`), the key-label parser, Key Promoter (`hints_key`, `hints_mouse`); `table.rs`
   **the hint rows per context, as data** (+ fallbacks and tip keys); `ui.rs` placement (bottom right, top right
   when the cursor line is under it) and the glass drawing; `tests.rs` the binding check and drawing tests.
   Hooks elsewhere: `App.hints`, `hints_key` first in `App::handle`, `hints_before`/`hints_mouse` around the mouse
@@ -186,6 +187,9 @@ used where the real key works shows "Tip: key" at its top for 3 s.
 | Ctrl+Shift+N, **Ctrl+P** | Go to File: type to fuzzy-filter, `name:42` jumps to line 42, ↑↓, Enter |
 | Ctrl+Shift+F, **Alt+F** | Find in Files (selection pre-fills it; smart case), Enter opens at the match, selected |
 | Ctrl+E | Recent Files (previous file preselected, type to filter) |
+| **Ctrl+T** (also Alt+S, Alt+Space; Option+Space on a Mac) | Search Everywhere: file names (FILES) and contents (TEXT) at once; Tab / Shift+Tab = All / Files / Text; `name:42` works; Enter opens at the match; Alt+F1 shows the row in the tree; from the focused tree it searches the selected folder (Backspace on an empty input widens) |
+| typing in the focused tree | speed search: jumps to the best matching name (closed folders too, via the index), ↑↓ next/previous match, Backspace, Esc clears |
+| while a popup row is selected | the tree (if shown) opens down to that file and selects it; Esc puts it back, opening keeps it |
 | in popups | Backspace, Ctrl+Backspace / Ctrl+H word, Ctrl+U clear, Esc close; mouse click opens a row, wheel scrolls |
 
 ## Keys (code smarts)
@@ -270,7 +274,11 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
   motions (`G`, `j`, `dG`) use `content_lines()` too: in Vim that empty line doesn't exist.
 - tmux `send-keys -l 'x;'`: a trailing `;` is a tmux command separator and is lost; send it as `'\;'`
   (the e2e `typ` helper does this).
-- Shift+Shift ("search everywhere") needs key *release* events (kitty `REPORT_EVENT_TYPES`); plan a fallback.
+- Shift+Shift ("search everywhere") needs key *release* events of a lone Shift (kitty `REPORT_ALL_KEYS_AS_ESCAPE_CODES`
+  + `REPORT_EVENT_TYPES`); not done. Search Everywhere is **Ctrl+T** (works in Terminal.app/iTerm2 with no setup).
+  On a Mac, Alt+S / Alt+Space need Option as Meta (Terminal.app: Settings → Profiles → Keyboard → "Use Option as
+  Meta key"; iTerm2: Profiles → Keys → Left Option key = Esc+; Ghostty: `macos-option-as-alt = true`). Without it
+  Option+Space types U+00A0, which catlas also reads as Search Everywhere; Option+S types `ß` and stays a letter.
 - Ctrl+Shift+N / Ctrl+Shift+F arrive as Ctrl+N / Ctrl+F without the kitty protocol (new file / find), hence the
   Ctrl+P / Alt+F fallbacks. Alt+1, Alt+F need "Option as Meta" on macOS terminals (else they type `¡`, `ƒ`).
 - Vim mode's undo groups: `Doc::begin_group` makes every edit until `end_group` one step; `undo`/`redo`
@@ -330,6 +338,7 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
   bracketed paste (Cmd+V / Ctrl+Shift+V), Ctrl+V pastes the editor's own clipboard.
 
 ## Decisions
+`docs/decisions/0009-quick-search.md` – Search Everywhere: Ctrl+T (+ Alt+S/Alt+Space, Mac NBSP), FILES + TEXT sections, tabs, folder scope from the tree, tree follow with snapshot/Esc restore, speed search.
 `docs/decisions/0008-shortcut-helper.md` – key-hints: glass panel bottom right, 20 contexts, fallbacks by kitty, Alt+/ + `settings.toml`, Key Promoter tips, `table.rs` as the single source with a binding test.
 `docs/decisions/0001-stack-and-keymap.md` – Rust + ratatui, IDEA keys by default, Vim optional, internal tool.
 `docs/decisions/0002-project-view.md` – M2 choices: args, ignore rules, own fuzzy scorer, smart-case find in files, fallback keys.
@@ -339,7 +348,14 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 `docs/decisions/0006-git-and-terminal.md` – M5 choices: bottom dock, PTY + vt100, git CLI + in-memory gutter diffs, commit rules (never push/force), leave keys.
 `docs/decisions/0007-more-language-servers.md` – languages.toml layers + merge rules, server per language, fallback on a failed start, `also` servers, snippets, pull diagnostics, new keys, what was installed.
 
-## Current state (2026-10-25)
+## Current state (2026-10-26)
+Search Everywhere done 2026-10-26 (quick-search, decision 0009, see Keys (project view)): Ctrl+T popup with
+file names and contents at once (FILES / TEXT sections, All/Files/Text tabs, `name:42`), folder scope from the
+tree, the tree following the selection in every project popup (Esc restores), Alt+F1 reveal, IDEA speed
+search in the tree (fuzzy on names, closed files via the index). Shortcut helper: 22 contexts. Tests: unit tests
+in `src/project/quick.rs` + `tree.rs` and binding tests for the 2 new contexts (235 unit), e2e
+`scenarios/quick_search.sh` (8 scenarios, 50 in all). Not done: double Shift (kitty), ranking content hits,
+opening a hidden tree to follow.
 Shortcut helper done 2026-10-25 (key-hints, decision 0008, see Keys (shortcut helper)): see-through panel bottom
 right in the editor area, 20 contexts, kitty/legacy key choice, moves to the top right off the cursor line, Alt+/
 toggle saved in `settings.toml` (new `src/config.rs`), `--no-hints`, Key Promoter tips. Tests: 32 unit tests in

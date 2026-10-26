@@ -54,9 +54,11 @@ pub enum Ctx {
     VimVisual,
     VimCommand,
     Tree,
+    TreeSearch,
     GotoFile,
     Recent,
     FindInFiles,
+    QuickSearch,
     Terminal,
     Commit,
     CommitMessage,
@@ -71,7 +73,7 @@ pub enum Ctx {
 
 /// Every context (tests walk them all).
 #[cfg(test)]
-pub const ALL: [Ctx; 20] = [
+pub const ALL: [Ctx; 22] = [
     Ctx::Idea,
     Ctx::Selection,
     Ctx::VimNormal,
@@ -79,9 +81,11 @@ pub const ALL: [Ctx; 20] = [
     Ctx::VimVisual,
     Ctx::VimCommand,
     Ctx::Tree,
+    Ctx::TreeSearch,
     Ctx::GotoFile,
     Ctx::Recent,
     Ctx::FindInFiles,
+    Ctx::QuickSearch,
     Ctx::Terminal,
     Ctx::Commit,
     Ctx::CommitMessage,
@@ -96,6 +100,8 @@ pub const ALL: [Ctx; 20] = [
 
 const GOTO_FILE: Hint = fb("Ctrl+Shift+N", "Ctrl+P", "go to file");
 const FIND_IN_FILES: Hint = fb("Ctrl+Shift+F", "Alt+F", "find in files");
+/// Search Everywhere: Ctrl+T reaches every terminal (Alt+S / Alt+Space too where Option is Meta).
+const QUICK: Hint = h("Ctrl+T", "search everywhere");
 const COMMIT: Hint = fb("Ctrl+Enter", "Alt+Enter", "commit ticked");
 const LEAVE_VIM: Hint = h("Ctrl+Alt+V", "IDEA keys (leave Vim)");
 
@@ -109,9 +115,11 @@ pub fn title(c: Ctx) -> &'static str {
         Ctx::VimVisual => "vim · VISUAL",
         Ctx::VimCommand => "vim · command line",
         Ctx::Tree => "project tree",
+        Ctx::TreeSearch => "tree · speed search",
         Ctx::GotoFile => "go to file",
         Ctx::Recent => "recent files",
         Ctx::FindInFiles => "find in files",
+        Ctx::QuickSearch => "search everywhere",
         Ctx::Terminal => "terminal",
         Ctx::Commit => "commit",
         Ctx::CommitMessage => "commit · message",
@@ -130,11 +138,11 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
     match c {
         Ctx::Idea => const { &[
             GOTO_FILE,
-            FIND_IN_FILES,
+            QUICK,
             h("Ctrl+E", "recent files"),
+            FIND_IN_FILES,
             h("Ctrl+F/G", "find / go to line"),
             h("Ctrl+B", "go to definition"),
-            h("Alt+Enter", "quick fix"),
             h("Alt+1/F12", "project / terminal"),
             h("Alt+←/→", "previous / next tab"),
         ] },
@@ -180,9 +188,18 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
             h("↑/↓", "move"),
             h("→/←", "unfold / fold"),
             h("Enter", "open"),
+            h("a-z", "speed search"),
+            h("Ctrl+T", "search in folder"),
             h("Esc", "editor"),
             h("Alt+1", "hide tree"),
             GOTO_FILE,
+        ] },
+        Ctx::TreeSearch => const { &[
+            h("a-z", "narrow"),
+            h("↑/↓", "prev / next match"),
+            h("Enter", "open"),
+            h("Backspace", "delete a letter"),
+            h("Esc", "clear search"),
         ] },
         Ctx::GotoFile => const { &[
             h("a-z", "filter · name:42"),
@@ -190,6 +207,15 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
             h("Enter", "open"),
             h("Ctrl+U", "clear"),
             h("Ctrl+E", "recent files"),
+            h("Esc", "close"),
+        ] },
+        Ctx::QuickSearch => const { &[
+            h("a-z", "names + text · :42"),
+            h("↑/↓", "pick · tree follows"),
+            h("Enter", "open"),
+            h("Tab/Shift+Tab", "all / files / text"),
+            h("Alt+F1", "show in tree"),
+            h("Ctrl+U", "clear"),
             h("Esc", "close"),
         ] },
         Ctx::Recent => const { &[h("a-z", "filter"), h("↑/↓", "select"), h("Enter", "open"), GOTO_FILE, h("Esc", "close")] },

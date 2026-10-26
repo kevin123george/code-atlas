@@ -225,8 +225,8 @@ fn fingerprint(app: &App) -> String {
     use crate::lsp::popup::Popup;
     let docs: Vec<String> = app.docs.iter().map(|d| format!("{:?}|{}|{:?}|{}|{}", d.path, d.rope, d.selection(), d.cursor, d.dirty())).collect();
     let p = &app.project;
-    let popup = p.popup.as_ref().map(|q| format!("{:?} {:?} {}", q.kind, q.input, q.selected));
-    let tree = (p.sidebar, p.focus_tree, p.tree.selected, p.tree.rows.len());
+    let popup = p.popup.as_ref().map(|q| format!("{:?} {:?} {} {:?} {:?}", q.kind, q.input, q.selected, p.quick.mode, p.quick.scope));
+    let tree = (p.sidebar, p.focus_tree, p.tree.selected, p.tree.rows.len(), p.tree.speed.clone());
     let a = &app.agents;
     let agents = format!("{} {} {:?} {} {} {:?} {:?} {} {} {}", a.visible, a.focus, a.area, a.mode_idx, a.include_ctx, a.input.text, a.selected, a.runs.len(), a.scroll, a.follow);
     let dk = &app.dock;
@@ -341,6 +341,16 @@ fn setups(ctx: Ctx) -> Vec<Setup> {
                 app.project.tree.selected = 0;
             },
         ],
+        Ctx::TreeSearch => vec![|app| {
+            app.project.focus_tree = true;
+            app.project.tree.expand(app.project.tree.rows.iter().position(|n| n.name == "sub").unwrap());
+            keys(app, "txt");
+        }],
+        Ctx::QuickSearch => vec![|app| {
+            app.project.open_quick(Some("ee".into()), None);
+            wait(app, "search hits", |a| a.project.hits.len() >= 3 && !a.project.searching());
+            app.project.popup.as_mut().unwrap().selected = 1;
+        }],
         Ctx::GotoFile => vec![|app| {
             keys(app, "Ctrl+P");
             keys(app, "txt");
@@ -553,6 +563,8 @@ binding_tests! {
     keys_vim_visual => VimVisual,
     keys_vim_command => VimCommand,
     keys_tree => Tree,
+    keys_tree_search => TreeSearch,
+    keys_quick_search => QuickSearch,
     keys_goto_file => GotoFile,
     keys_recent => Recent,
     keys_find_in_files => FindInFiles,
@@ -586,6 +598,13 @@ fn context_follows_the_focus() {
     assert_eq!(context(&app), Ctx::Idea, "back in the editor, the dock stays open");
     keys(&mut app, "Alt+1");
     assert_eq!(context(&app), Ctx::Tree);
+    keys(&mut app, "b");
+    assert_eq!(context(&app), Ctx::TreeSearch);
+    assert_eq!(title(&app, Ctx::TreeSearch), "tree · speed search");
+    keys(&mut app, "Esc");
+    keys(&mut app, "Ctrl+T");
+    assert_eq!(context(&app), Ctx::QuickSearch);
+    keys(&mut app, "Esc");
     keys(&mut app, "Esc");
     keys(&mut app, "Alt+9");
     assert_eq!(context(&app), Ctx::AgentsPrompt);

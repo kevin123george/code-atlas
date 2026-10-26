@@ -95,7 +95,7 @@ impl App {
             docs,
             active: 0,
             prompt: None,
-            message: Some("Ctrl+S save · Ctrl+P file · Alt+1 project · Alt+F find in files · Ctrl+E recent · Ctrl+Q quit".into()),
+            message: Some("Ctrl+S save · Ctrl+T search everywhere · Ctrl+P file · Alt+1 project · Alt+F find in files · Ctrl+Q quit".into()),
             quit: false,
             armed: None,
             clip: Clip::default(),
