@@ -5,8 +5,8 @@
 
 ## What it is
 An internal Atelier Astra tool: a terminal code editor that feels like IntelliJ IDEA (type straight away, IDEA
-shortcuts) with an optional Vim mode, project view, code smarts over LSP, git, a terminal pane, and a panel to
-run and watch Claude agents. Binary: `catlas`.
+shortcuts) with an optional Vim mode, project view, code smarts over LSP, git (with a live review of what agents
+changed), a terminal pane, and a panel to run and watch Claude agents. Binary: `catlas`.
 `catlas <dir>` opens a project (no arguments = the current folder); `catlas <dir> file …` also opens files.
 
 ## Where it runs
@@ -105,18 +105,29 @@ highlighting only.
   keys), `agents_mouse`/`agents_paste` first in `App::handle`, `draw_panel` in `ui::draw` (takes the right
   45 columns before the sidebar), `app.agents_tick()` in the main loop, `Doc::reload_text` in `doc.rs`.
 - `src/dock.rs` – bottom dock (M5): tabs Terminal / Commit, focus, layout (`split_rows`), keys, mouse, paste,
-  `dock_tick` glue (returns "redraw"), drawing the tab row and bodies.
+  `dock_tick` glue (returns "redraw"; it also runs `git_view_tick`), drawing the tab row and bodies.
 - `src/term/` – terminal pane (M5): `mod.rs` PTY + reader thread + `vt100` parser, query replies, resize,
   scrollback; `keys.rs` key → xterm bytes and query detection; `ui.rs` screen → buffer (ANSI palette in theme colours).
-- `src/git/` – git (M5): `mod.rs` state + background jobs (status, HEAD texts, gutter diffs, commit, diff view);
-  `status.rs` porcelain parser; `diff.rs` gutter marks + unified rows (`similar`); `ui.rs` gutter marks, Commit
-  panel, diff view, branch label, tree colours.
+- `src/git/` – git (M5): `mod.rs` state + background jobs (status, HEAD texts, gutter diffs, commit, diff view),
+  `run`/`run_with` (env, stdin), `apply`, `snapshot` (temp-index tree of the working tree), `toplevel`;
+  `status.rs` porcelain parser (`staged`, `partial`); `diff.rs` gutter marks + unified rows (`similar`); `ui.rs`
+  gutter marks, Commit panel, diff view, branch label, tree colours.
+  Git view (decision 0012): `view.rs` `GitView` state + `impl App` glue (keys, mouse, paste, tick, open,
+  `review_run`); `view_ui.rs` drawing (title bar, review document unified / side by side, file list, log,
+  branches popup, footer); `review.rs` the review model (scopes Worktree / Run / Commit, background `build`
+  with fingerprint, rows, cursor anchors, stage / revert / undo ops, `run_stat`); `patch.rs` `git diff` parser,
+  hunk / file patches, untracked → all-added, numstat, word ranges; `log.rs` log parsing, filter, ages, Claude
+  trailer; `graph.rs` lane layout; `blame.rs` blame parse + per-file jobs + gutter cell; `branches.rs` branch
+  list/actions, push / pull / fetch descriptions and runs.
   Hooks elsewhere: `App.dock`; `dock_key`/`dock_paste`/`dock_mouse` first in `App::handle` (before the agents panel's); `redraw |= app.dock_tick()` in the
   main loop; `dock::split`/`draw`/`draw_over_editor`, `git::ui::draw_mark` (in `draw_text`),
   `draw_branch` (status bar) and `!app.dock.has_focus()` (cursor, `block_cursor`) in `ui.rs`; `tree_color` in
-  `project/ui.rs`.
+  `project/ui.rs`. Git view hooks: `App.git_view`, `git_view_key` in `App::handle` after the dock and prompt and
+  before the agents panel, `git_view_mouse` / `git_view_paste` next to the dock's, `view_ui::draw` over the
+  editor + tree area (after `draw_over_editor`) and the blame columns in `draw_text` (`ui.rs`), Ctrl+D in
+  `agents_key`, `Baseline::take` in `Run::start`, the stat jobs in `agents_tick`.
 - `src/hints/` – shortcut helper (key-hints, decision 0008): `mod.rs` `Hints` state (on, kitty, tip), `context()`
-  (what has focus → one of 22 `Ctx`), the key-label parser, Key Promoter (`hints_key`, `hints_mouse`); `table.rs`
+  (what has focus → one of 29 `Ctx`), the key-label parser, Key Promoter (`hints_key`, `hints_mouse`); `table.rs`
   **the hint rows per context, as data** (+ fallbacks and tip keys); `ui.rs` placement (bottom right, top right
   when the cursor line is under it) and the glass drawing; `tests.rs` the binding check and drawing tests.
   Hooks elsewhere: `App.hints`, `hints_key` first in `App::handle`, `hints_before`/`hints_mouse` around the mouse
@@ -267,7 +278,26 @@ and completion opens by itself only in insert mode (Ctrl+J stays Vim's line down
 | dock focused | Ctrl+Shift+↑/↓ taller/shorter |
 - Gutter: green bar = added line, blue bar = changed, red ▁ = lines deleted below (▔ at the top of the file), vs
   HEAD and live while typing. Tree: modified blue, new green, folders with changes blue. Branch: `⎇ main` in the
-  status bar. The editor never pushes, forces, amends or resets.
+  status bar. The editor never forces, amends or resets, and never pushes, pulls or fetches by itself: only
+  `P` / `U` / `F` in the Git view do, after a question (decision 0012). Ticked files whose row says
+  `· staged hunks only` commit only their staged hunks.
+
+## Keys (git view: review, log, branches)
+Decision 0012. The view covers the editor and the tree (the agents panel stays); single-letter keys inside.
+| Key | Does |
+|---|---|
+| **Ctrl+L** (also Alt+8) | open / close the Git view (not in the terminal pane: Ctrl+L is the shell's there) · with blame on: the cursor line's commit |
+| `1` / `2` | Changes (the review) / Log |
+| in Changes | ↑↓ j k PgUp PgDn Space Home End (g G) move · **F7 / Shift+F7** (n / p) next / previous hunk, across files · **Tab / Shift+Tab** (`]` `[`, Alt+↓/↑) next / previous file · **Enter / F4** open the file there · **s** stage / unstage the hunk (on a file header: the file) · **S** the whole file · **r** revert the hunk · **R** the file (both ask; y / Enter yes, n / Esc no) · **u** (Ctrl+Z) undo the last revert · **v** side by side / unified · **a** review an agent run (cycles this project's runs, newest first, then the working tree) · **t** in a run's review: only the files its tools edited · F5 refresh · click a file in the list, wheel scrolls |
+| in Log | ↑↓ PgUp PgDn Home End · **Enter** commit details (Esc back) · **/** filter (words, `author:name` / `@name`, `@claude`, `path:file` + Enter) · **h** history of the editor's file (again: all branches) · **y** copy the hash |
+| anywhere in the view | **b** blame the editor's file (gutter; b again off) · **B** branches (Enter switch, n new, r rename, d delete merged) · **P / U / F** push / pull (ff-only) / fetch, each after a question saying what goes where · Esc close |
+| agents panel | **Ctrl+D** review what the selected run changed since it started |
+- Title bar: branch, what is reviewed (working tree, `agent run #3 “…”`, a commit), files and +/−, `● live`
+  (refreshes every second while open), `⠋ agent working` while a run is going. Footer: the keys, or the
+  question / input line.
+- File headers say `✳ #id title` when an agent run's edit tools wrote the file; the log marks commits with a
+  `Co-Authored-By: Claude` trailer with `✳`; blame does too.
+- The Commit panel commits only the staged hunks of a file whose row says `· staged hunks only`.
 
 ## Keys (Vim mode)
 Off by default. On with `catlas --vim`, `CATLAS_VIM=1`, or **Ctrl+Alt+V** at runtime (toggles; the status bar
@@ -368,6 +398,14 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 - Ctrl+Alt+L / Alt+Enter / Alt+F7 / Alt+N / Alt+6 / Ctrl+Alt+B need "Option as Meta" on macOS terminals for the Alt part. Ctrl+Alt+Shift+N arrives as Ctrl+Alt+N without the kitty protocol (both open the symbol search).
 - Agents panel: `claude -p` can't ask for permissions, so in the default mode edits are refused (red `⏺` line +
   "N denied"); use Alt+M → acceptEdits for edits. `manual` reports itself as `default` in the init line.
+- Git view e2e: a fake `claude` and a fake `ssh` go in `$SCRATCH/bin` (first on PATH): the agents panel checks
+  the Aa staff over ssh as soon as it opens, which tests must never do (`scenarios/git_view.sh` `fake_claude`).
+- Git view: while it is open the editor below gets no keys; the view counts as focused whenever the tree,
+  agents panel, dock and popups don't have the focus, so after Esc in the Commit panel the view has the keys
+  again (Ctrl+L there would close it). A run's review resets when switching `t` or `a`: keys wait until it
+  has loaded ("Still reading the changes…").
+- Run snapshots are unreferenced tree objects (no ref, no stash entry): `git gc` may prune them after its
+  grace period; such an old run's review then fails with a git error.
 - Agents panel: never test the stream with a nested `claude` you don't need: `CATLAS_CLAUDE=fake.sh` (prints
   stream-json lines) and `CATLAS_STAFF_CMD='exit 1'` (unreachable) make free e2e runs; `CATLAS_CONFIG_DIR`
   keeps test runs out of your real `~/.config/code-atlas/agents.json`.
@@ -378,6 +416,7 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
   bracketed paste (Cmd+V / Ctrl+Shift+V), Ctrl+V pastes the editor's own clipboard.
 
 ## Decisions
+`docs/decisions/0012-git-view.md` – Git view: review of working tree / agent run / commit as one live document (1 s refresh, fingerprint), Ctrl+L / Alt+8, single-letter keys, hunk stage/unstage via `git apply --cached`, partial commits from the index, revert with confirm + byte-level undo, run snapshots (temp index, user's index untouched) + Ctrl+D, log with own lane graph and ✳ for Claude commits, blame with `--contents -`, branches popup, push/pull/fetch behind a question.
 `docs/decisions/0011-autocomplete.md` – completion as you type (100 ms pause, server trigger characters, not in comments/strings/prose, newest answer only), Ctrl+J / Ctrl+@ next to Ctrl+Space (macOS takes it), Enter on a typed-out word = new line, word completion from open buffers (alone or under few server items), `autocomplete` setting.
 `docs/decisions/0010-mac-undo-and-xml.md` – Cmd+Z/Cmd chords via SUPER (editor only), Ω-after-undo redo, Alt+Shift+Z, "Nothing to undo", no-op edits make no undo step, XML/DTD highlighting (tree-sitter-xml), per-line `<!-- -->` comments, lemminx entry.
 `docs/decisions/0009-quick-search.md` – Search Everywhere: Ctrl+T (+ Alt+S/Alt+Space, Mac NBSP), FILES + TEXT sections, tabs, folder scope from the tree, tree follow with snapshot/Esc restore, speed search.
@@ -391,6 +430,20 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 `docs/decisions/0007-more-language-servers.md` – languages.toml layers + merge rules, server per language, fallback on a failed start, `also` servers, snippets, pull diagnostics, new keys, what was installed.
 
 ## Current state (2026-10-26)
+Git view done 2026-10-26 (git-view, decision 0012, see Keys (git view)): Ctrl+L / Alt+8 opens a view over the
+editor with **Changes** (one live document of every change: unstaged, untracked, staged; syntax colours, word
+highlights, side by side from 150 columns, file list left or on top at 80 columns; refreshes every second while
+an agent edits) and **Log** (lane graph, refs, ✳ for Claude-co-authored commits, filter, file history, commit
+details). Hunk stage / unstage (`git apply --cached`) feeding partial commits in the Commit panel, revert hunk /
+file with a question and `u` undo, blame gutter (`b`, Ctrl+L on a line → its commit), branches popup, push / pull
+(ff-only) / fetch behind a question. Agent runs snapshot the working tree before their first turn (temp index;
+the user's index/stash untouched), count "N files +a −d" after each turn, and Ctrl+D in the agents panel (or `a`
+in the review) shows everything since the run started (`t`: only the files its tools wrote). Tests: 295 unit
+(patch parse + `git apply` round trips, graph layout, log/blame parsing, review model + actions, run snapshots,
+push/pull against a bare repo in the temp dir, view drawing at 80/200 columns, 7 new binding-test contexts), e2e
+`scenarios/git_view.sh` (live refresh ~1 s, stage + partial commit + revert + undo, log graph + filter + history,
+an agent run's review with a fake `claude`, blame; 63 in all). Not done: staging single lines, renames as
+renames, conflict view, stash / cherry-pick / rebase UI, horizontal scroll of long diff lines.
 Completion as you type done 2026-10-26 (autocomplete, decision 0011, see Keys (code smarts)): the list opens by
 itself after a 100 ms pause in a name and on the server's trigger characters, stale answers dropped by sequence
 number, Ctrl+J (and Ctrl+@) where macOS takes Ctrl+Space, words from the open buffers without a server and under

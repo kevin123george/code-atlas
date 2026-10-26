@@ -71,6 +71,8 @@ pub struct App {
     pub dock: crate::dock::Dock,
     /// Shortcut helper, bottom right (`src/hints/`).
     pub hints: crate::hints::Hints,
+    /// Git view over the editor area: review, log, branches, blame (`src/git/view.rs`).
+    pub git_view: crate::git::view::GitView,
     /// The last editor key was undo or redo: a macOS Option+Z character (`Ω`) now redoes
     /// (see `mackeys::option_redo`).
     undo_chain: bool,
@@ -113,6 +115,7 @@ impl App {
             vim: None,
             lsp,
             hints: crate::hints::Hints::load(),
+            git_view: crate::git::view::GitView::default(),
             undo_chain: false,
         })
     }
@@ -163,6 +166,9 @@ impl App {
                 } else if self.prompt.is_some() {
                     self.prompt_key(k);
                     self.after_ide(before);
+                } else if self.git_view_key(k) {
+                    // Handled by the Git view (src/git/view.rs): review, log, branches.
+                    self.after_ide(before);
                 } else if self.agents_key(k) {
                     // Handled by the agents panel (src/agents/), before Vim and the editor.
                     self.after_ide(before);
@@ -186,7 +192,7 @@ impl App {
             }
             Event::Paste(text) => {
                 self.undo_chain = false;
-                if self.dock_paste(&text) || self.agents_paste(&text) {
+                if self.dock_paste(&text) || self.agents_paste(&text) || self.git_view_paste(&text) {
                     return;
                 }
                 if self.vim.as_mut().is_some_and(|v| v.paste(&text)) {
@@ -206,7 +212,7 @@ impl App {
                 self.undo_chain = false;
                 let before = self.active;
                 let hints_before = self.hints_before();
-                if !self.dock_mouse(m) && !self.agents_mouse(m) && !self.project_mouse(m) {
+                if !self.dock_mouse(m) && !self.git_view_mouse(m) && !self.agents_mouse(m) && !self.project_mouse(m) {
                     self.mouse(m);
                 }
                 self.after_ide(before);
@@ -557,7 +563,7 @@ impl App {
 
 /// Puts copied text on the system clipboard: pbcopy / wl-copy / xclip when there,
 /// else the OSC 52 escape (works over SSH in most terminals).
-fn set_system_clipboard(text: &str) {
+pub(crate) fn set_system_clipboard(text: &str) {
     if cfg!(test) {
         return; // unit tests never touch the real clipboard
     }

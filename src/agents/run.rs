@@ -194,6 +194,26 @@ pub fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+/// The working tree when a run started (decision 0012): HEAD and a snapshot tree of every
+/// file (`git::snapshot`, the user's index untouched), so a review can show what changed since.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Baseline {
+    pub head: Option<String>,
+    pub tree: String,
+    /// Unix seconds.
+    pub at: u64,
+}
+
+impl Baseline {
+    /// Snapshots the repository `cwd` is in; None outside a repository or on a git error.
+    pub fn take(cwd: &Path) -> Option<Baseline> {
+        let root = crate::git::toplevel(cwd)?;
+        let tree = crate::git::snapshot(&root).ok()?;
+        let head = crate::git::run(&root, &["rev-parse", "-q", "--verify", "HEAD"]).ok().map(|h| h.trim().to_string());
+        Some(Baseline { head, tree, at: now_secs() })
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Run {
     pub id: u64,
@@ -215,6 +235,15 @@ pub struct Run {
     pub cost: f64,
     pub turns: u32,
     pub entries: Vec<Entry>,
+    /// The working tree before the first turn (reviews: Ctrl+D).
+    #[serde(default)]
+    pub base: Option<Baseline>,
+    /// Files the agent's edit tools wrote (absolute, as the agent named them).
+    #[serde(default)]
+    pub touched: Vec<PathBuf>,
+    /// "3 files +42 −7" since `base`, counted after each turn.
+    #[serde(default)]
+    pub stat: Option<String>,
     #[serde(skip)]
     pub proc: Option<Proc>,
     /// Edit-tool calls waiting for their result: tool id → the file they write.
@@ -254,6 +283,9 @@ impl Run {
             cost: 0.0,
             turns: 0,
             entries: Vec::new(),
+            base: None,
+            touched: Vec::new(),
+            stat: None,
             proc: None,
             pending_files: HashMap::new(),
         }
@@ -290,6 +322,10 @@ impl Run {
     /// Starts `program` (normally `claude`) for `turn`, resuming this run's session if it has one.
     pub fn start(&mut self, program: &str, turn: &Turn) {
         let args = claude_args(turn, self.session_id.as_deref());
+        if self.base.is_none() {
+            // Before the agent can touch anything (a few git calls; the index is copied).
+            self.base = Baseline::take(&self.cwd);
+        }
         self.begin_turn(turn);
         match Proc::spawn(program, &args, &self.cwd.clone(), turn.prompt.clone()) {
             Ok(p) => self.proc = Some(p),
@@ -341,6 +377,9 @@ impl Run {
                 }
                 Event::ToolResult { id, ok, text } => {
                     if let Some(f) = self.pending_files.remove(&id).filter(|_| ok) {
+                        if !self.touched.contains(&f) {
+                            self.touched.push(f.clone());
+                        }
                         ch.files.push(f);
                     }
                     if let Some(Entry::Tool { status, note, .. }) =
@@ -523,6 +562,7 @@ mod tests {
         assert_eq!(r.mode_used.as_deref(), Some("acceptEdits"));
         assert!(ch.session);
         assert_eq!(ch.files, vec![PathBuf::from("/tmp/scratch/hello.txt")]);
+        assert_eq!(r.touched, ch.files, "the run remembers what its tools wrote");
         assert!(matches!(&r.entries[2], Entry::Tool { name, status: ToolStatus::Ok, .. } if name == "Write"));
         assert!(matches!(r.entries.last(), Some(Entry::Done { ok: true, turns: 2, .. })));
         assert!((r.cost - 0.1125078).abs() < 1e-9);

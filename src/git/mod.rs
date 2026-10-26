@@ -2,9 +2,17 @@
 //! the diff view. Everything runs the `git` CLI on short-lived threads; [`Git::poll`] drains the
 //! results every loop turn. Never pushes, never forces anything.
 
+pub mod blame;
+pub mod branches;
 pub mod diff;
+pub mod graph;
+pub mod log;
+pub mod patch;
+pub mod review;
 pub mod status;
 pub mod ui;
+pub mod view;
+pub mod view_ui;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -26,15 +34,35 @@ const NO_REPO_EVERY: Duration = Duration::from_secs(10);
 
 /// Runs `git -C dir args…`; stdout on success, stderr as the error.
 pub fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .arg("-C")
+    run_with(dir, args, &[], None)
+}
+
+/// [`run`] with extra environment variables and (optionally) bytes on stdin.
+pub fn run_with(dir: &Path, args: &[&str], env: &[(&str, &std::ffi::OsStr)], stdin: Option<&[u8]>) -> Result<String, String> {
+    use std::io::Write;
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
         .arg(dir)
         .args(args)
         // Status shouldn't take locks another git process (or the user) is waiting for.
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("git: {e}"))?;
+        // Never ask for a password or passphrase over the editor (push/pull/fetch).
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("git: {e}"))?;
+    if let (Some(data), Some(mut input)) = (stdin, child.stdin.take()) {
+        // A thread, so a big input can't deadlock against a full stdout pipe.
+        let data = data.to_vec();
+        std::thread::spawn(move || {
+            let _ = input.write_all(&data);
+        });
+    }
+    let out = child.wait_with_output().map_err(|e| format!("git: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
@@ -44,7 +72,37 @@ pub fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-fn job<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Receiver<T> {
+/// `git apply <args> -` with `patch` on stdin (`--cached` stages, `-R` reverses).
+pub fn apply(root: &Path, patch: &str, args: &[&str]) -> Result<(), String> {
+    let mut a = vec!["apply", "--whitespace=nowarn"];
+    a.extend_from_slice(args);
+    a.push("-");
+    run_with(root, &a, &[], Some(patch.as_bytes())).map(|_| ())
+}
+
+/// A tree object of the working tree as it is now (tracked + untracked, minus ignored files),
+/// made with a throwaway copy of the index: the user's index, stash and refs are untouched.
+/// Its objects are unreferenced, so `git gc` may prune them after its grace period (2 weeks).
+pub fn snapshot(root: &Path) -> Result<String, String> {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let tmp = std::env::temp_dir().join(format!("catlas-snap-{}-{}.index", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
+    // Starting from a copy keeps git's stat cache: only changed files are hashed again.
+    let index = run(root, &["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
+    if std::fs::copy(index.trim(), &tmp).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    let env = [("GIT_INDEX_FILE", tmp.as_os_str())];
+    let r = run_with(root, &["add", "-A", "--", "."], &env, None).and_then(|_| run_with(root, &["write-tree"], &env, None));
+    let _ = std::fs::remove_file(&tmp);
+    r.map(|t| t.trim().to_string())
+}
+
+/// The repository root (canonical) for a folder inside it.
+pub fn toplevel(dir: &Path) -> Option<PathBuf> {
+    run(dir, &["rev-parse", "--show-toplevel"]).ok().map(|t| crate::project::canonical(Path::new(t.trim())))
+}
+
+pub(crate) fn job<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Receiver<T> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         let _ = tx.send(f());
@@ -394,18 +452,30 @@ impl Git {
             return Err("Write a commit message first".into());
         }
         let mut paths: Vec<String> = Vec::new();
+        // Ticked files with staged hunks *and* other changes: only their staged part goes in.
+        let mut partial: Vec<String> = Vec::new();
         for e in self.entries.iter().filter(|e| self.panel.checked.contains(&e.path)) {
             if e.kind() == Kind::Conflict {
                 return Err(format!("{} has conflicts; resolve them first", e.path));
             }
+            if e.partial() {
+                partial.push(e.path.clone());
+                continue;
+            }
             paths.push(e.path.clone());
             paths.extend(e.orig.clone());
         }
-        if paths.is_empty() {
+        if paths.is_empty() && partial.is_empty() {
             return Err("Tick at least one file (Space)".into());
         }
+        if !partial.is_empty() {
+            // The commit then takes the index as it is, so nothing unticked may be staged.
+            if let Some(e) = self.entries.iter().find(|e| e.staged() && !self.panel.checked.contains(&e.path)) {
+                return Err(format!("{} has staged changes but isn't ticked: tick it, or unstage it in the review (Ctrl+L)", e.path));
+            }
+        }
         let n = self.panel.checked.len();
-        self.commit_job = Some(job(move || commit(&root, &paths, &msg, n)));
+        self.commit_job = Some(job(move || commit(&root, &paths, &partial, &msg, n)));
         Ok(())
     }
 
@@ -426,16 +496,29 @@ impl Git {
     }
 }
 
-fn commit(root: &Path, paths: &[String], msg: &str, n: usize) -> Result<String, String> {
-    let mut add = vec!["add", "-A", "--"];
-    add.extend(paths.iter().map(String::as_str));
-    run(root, &add)?;
-    let mut ci = vec!["commit", "-q", "-m", msg, "--"];
-    ci.extend(paths.iter().map(String::as_str));
+/// `git add` the whole-file paths, then commit. With `partial` files (staged hunks plus other
+/// changes) the commit is the index as it stands (only their staged hunks); otherwise only
+/// `paths` are committed, whatever else is staged.
+fn commit(root: &Path, paths: &[String], partial: &[String], msg: &str, n: usize) -> Result<String, String> {
+    if !paths.is_empty() {
+        let mut add = vec!["add", "-A", "--"];
+        add.extend(paths.iter().map(String::as_str));
+        run(root, &add)?;
+    }
+    let mut ci = vec!["commit", "-q", "-m", msg];
+    if partial.is_empty() {
+        ci.push("--");
+        ci.extend(paths.iter().map(String::as_str));
+    }
     run(root, &ci)?;
     let sha = run(root, &["rev-parse", "--short", "HEAD"]).unwrap_or_default();
     let subject = msg.lines().next().unwrap_or("");
-    Ok(format!("Committed {n} file(s) as {}: {subject}", sha.trim()))
+    let note = match partial.len() {
+        0 => String::new(),
+        1 => format!(" (staged hunks of {})", partial[0]),
+        k => format!(" (staged hunks of {k} files)"),
+    };
+    Ok(format!("Committed {n} file(s) as {}: {subject}{note}", sha.trim()))
 }
 
 fn build_diff(root: &Path, e: &Entry) -> DiffView {

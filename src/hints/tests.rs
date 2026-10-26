@@ -255,8 +255,28 @@ fn fingerprint(app: &App) -> String {
         Some(Popup::Hover { scroll, .. }) => format!("hover {scroll}"),
     };
     let prompt = app.prompt.as_ref().map(|p| format!("{} {:?}", p.kind.label(), p.input));
+    let gv = &app.git_view;
+    let git_view = format!(
+        "{} {:?} {:?} {} {} {} {:?} {:?} {:?} {:?} {} {:?} {:?} {:?} {} {}",
+        gv.open,
+        gv.tab,
+        gv.scope_label(),
+        gv.review.cursor,
+        gv.review.rows.len(),
+        gv.review.sbs,
+        gv.sbs_pref,
+        gv.confirm.as_ref().map(|c| c.question.clone()),
+        gv.input.as_ref().map(|i| i.text.clone()),
+        gv.branches.as_ref().map(|b| (b.sel, b.list.len())),
+        gv.log.sel,
+        gv.log.path,
+        gv.log.filter,
+        gv.details.as_ref().map(|d| (d.cursor, d.rows.len())),
+        gv.undo.len(),
+        gv.blames.on.len()
+    );
     format!(
-        "active {} docs {docs:?}\nprompt {prompt:?} msg {:?} quit {} clip {:?}\nproject {popup:?} {tree:?}\nagents {agents}\ndock {dock} term {term:?}\nvim {vim:?} lsp {lsp} hints {}",
+        "active {} docs {docs:?}\nprompt {prompt:?} msg {:?} quit {} clip {:?}\nproject {popup:?} {tree:?}\nagents {agents}\ndock {dock} term {term:?}\nvim {vim:?} lsp {lsp} hints {}\ngit view {git_view}",
         app.active, app.message, app.quit, app.clip.text, app.hints.on
     )
 }
@@ -449,6 +469,81 @@ fn setups(ctx: Ctx) -> Vec<Setup> {
             app.lsp.popup = Some(Popup::Picker(p));
         }],
         Ctx::Prompt => vec![|app| app.prompt = Some(Prompt { kind: PromptKind::Find, input: "five".into() })],
+        Ctx::GitChanges => vec![
+            |app| git_view(app),
+            |app| {
+                git_view(app);
+                keys(app, "F7");
+            },
+        ],
+        Ctx::GitLog => vec![
+            |app| git_log(app),
+            |app| {
+                git_log(app);
+                keys(app, "↓");
+            },
+        ],
+        Ctx::GitCommit => vec![
+            |app| git_commit(app),
+            |app| {
+                git_commit(app);
+                keys(app, "F7");
+            },
+        ],
+        Ctx::GitBranches => vec![
+            |app| git_branches(app, false),
+            |app| git_branches(app, true),
+        ],
+        Ctx::GitConfirm => vec![|app| {
+            git_view(app);
+            keys(app, "r");
+        }],
+        Ctx::GitInput => vec![|app| {
+            git_log(app);
+            keys(app, "/");
+            keys(app, "fi");
+        }],
+        Ctx::Blame => vec![|app| {
+            let path = app.docs[0].path.clone().unwrap();
+            assert!(app.git_view.blames.toggle(&path));
+            let rev = app.docs[0].rev();
+            wait(app, "blame", |a| a.git_view.blames.get(Some(&path)).is_some_and(|b| b.rev == Some(rev)));
+        }],
+    }
+}
+
+/// The Git view open on the Changes review (a.txt with two hunks, b.txt).
+fn git_view(app: &mut App) {
+    keys(app, "Ctrl+L");
+    assert!(app.git_view.open, "{:?}", app.message);
+    wait(app, "the review", |a| a.git_view.review.loaded && !a.git_view.review.busy() && a.git_view.review.model.files.len() == 2);
+}
+
+/// The Log tab with two commits (the changes committed as "second").
+fn git_log(app: &mut App) {
+    let root = app.project.root.clone();
+    git(&root, &["commit", "-qam", "second"]);
+    keys(app, "Ctrl+L");
+    keys(app, "2");
+    wait(app, "the log", |a| a.git_view.log.loaded && a.git_view.log.shown.len() == 2);
+}
+
+/// Details of the "second" commit (two files, three hunks).
+fn git_commit(app: &mut App) {
+    git_log(app);
+    keys(app, "Enter");
+    wait(app, "commit details", |a| a.git_view.details.as_ref().is_some_and(|d| d.loaded && !d.busy()));
+}
+
+fn git_branches(app: &mut App, other: bool) {
+    let root = app.project.root.clone();
+    git(&root, &["branch", "side"]);
+    git_view(app);
+    keys(app, "B");
+    let b = app.git_view.branches.as_mut().expect("branches popup");
+    assert_eq!(b.list.len(), 2);
+    if other {
+        b.sel = 1 - b.sel;
     }
 }
 
@@ -580,6 +675,13 @@ binding_tests! {
     keys_completion => Completion,
     keys_list => List,
     keys_prompt => Prompt,
+    keys_git_changes => GitChanges,
+    keys_git_log => GitLog,
+    keys_git_commit => GitCommit,
+    keys_git_branches => GitBranches,
+    keys_git_confirm => GitConfirm,
+    keys_git_input => GitInput,
+    keys_blame => Blame,
 }
 
 // ---- context selection and drawing in a real App ---------------------------------------------

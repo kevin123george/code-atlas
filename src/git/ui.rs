@@ -123,6 +123,8 @@ pub fn draw_panel(buf: &mut Buffer, git: &mut Git, area: Rect, focused: bool) ->
             Some(o) => format!("{} ← {o}", e.path),
             None => e.path.clone(),
         };
+        // Some hunks staged in the review: only those go into the commit.
+        let name = if e.partial() { format!("{name} · staged hunks only") } else { name };
         let style = Style::new().fg(if k == Kind::Deleted { MUTED } else { kind_color(k) }).bg(bg);
         let style = if k == Kind::Deleted { style.add_modifier(Modifier::CROSSED_OUT) } else { style };
         put(buf, x + 1, y, &name, list.right().saturating_sub(x + 2), style);

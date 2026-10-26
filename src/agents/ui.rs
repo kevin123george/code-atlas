@@ -141,6 +141,9 @@ pub fn draw_panel(buf: &mut Buffer, app: &mut App, area: Rect) -> (Rect, Option<
             if run.cost > 0.0 {
                 m.push_str(&format!(" · ${:.2}", run.cost));
             }
+            if let Some(st) = &run.stat {
+                m.push_str(&format!(" · {st}"));
+            }
             m
         }
         None => "new agent".into(),

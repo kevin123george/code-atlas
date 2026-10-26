@@ -38,6 +38,16 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// Something of this path is in the index (staged).
+    pub fn staged(&self) -> bool {
+        !matches!(self.x, ' ' | '?' | '!')
+    }
+
+    /// Staged changes *and* more changes in the working tree (e.g. some hunks staged).
+    pub fn partial(&self) -> bool {
+        self.staged() && self.kind() != Kind::Conflict && matches!(self.y, 'M' | 'D' | 'T')
+    }
+
     pub fn kind(&self) -> Kind {
         let (x, y) = (self.x, self.y);
         match (x, y) {
@@ -135,5 +145,9 @@ mod tests {
         assert_eq!(st.entries[0].kind(), Kind::Added);
         assert_eq!(st.entries[1].path, "my file.rs");
         assert_eq!(st.entries[1].kind(), Kind::Modified);
+        assert!(st.entries[1].partial() && st.entries[0].partial());
+        let st = parse("## main\0M  staged.rs\0 M wt.rs\0?? new.rs\0");
+        assert!(st.entries.iter().all(|e| !e.partial()));
+        assert_eq!(st.entries.iter().map(Entry::staged).collect::<Vec<_>>(), vec![false, true, false]);
     }
 }

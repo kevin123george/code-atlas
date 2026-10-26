@@ -70,11 +70,18 @@ pub enum Ctx {
     Completion,
     List,
     Prompt,
+    GitChanges,
+    GitLog,
+    GitCommit,
+    GitBranches,
+    GitConfirm,
+    GitInput,
+    Blame,
 }
 
 /// Every context (tests walk them all).
 #[cfg(test)]
-pub const ALL: [Ctx; 22] = [
+pub const ALL: [Ctx; 29] = [
     Ctx::Idea,
     Ctx::Selection,
     Ctx::VimNormal,
@@ -97,6 +104,13 @@ pub const ALL: [Ctx; 22] = [
     Ctx::Completion,
     Ctx::List,
     Ctx::Prompt,
+    Ctx::GitChanges,
+    Ctx::GitLog,
+    Ctx::GitCommit,
+    Ctx::GitBranches,
+    Ctx::GitConfirm,
+    Ctx::GitInput,
+    Ctx::Blame,
 ];
 
 const GOTO_FILE: Hint = fb("Ctrl+Shift+N", "Ctrl+P", "go to file");
@@ -112,6 +126,8 @@ const UNDO_REDO: Hint = fb("Ctrl+(Shift+)Z", "Ctrl+Z/Alt+Z", "undo / redo");
 /// Completion (decision 0011): macOS takes Ctrl+Space for switching input sources, in every
 /// terminal, so Ctrl+J is always shown next to it.
 const COMPLETE: Hint = h("Ctrl+Space/J", "complete");
+/// The Git view (decision 0012): Ctrl+L reaches every terminal; Alt+8 too where Option is Meta.
+const GIT_VIEW: Hint = h("Ctrl+L", "git review / log");
 
 /// The panel title for a context (some add a detail, see `super::title`).
 pub fn title(c: Ctx) -> &'static str {
@@ -138,6 +154,13 @@ pub fn title(c: Ctx) -> &'static str {
         Ctx::Completion => "completion",
         Ctx::List => "list",
         Ctx::Prompt => "prompt",
+        Ctx::GitChanges => "git · review",
+        Ctx::GitLog => "git · log",
+        Ctx::GitCommit => "git · commit",
+        Ctx::GitBranches => "git · branches",
+        Ctx::GitConfirm => "git · confirm",
+        Ctx::GitInput => "git · input",
+        Ctx::Blame => "editor · blame",
     }
 }
 
@@ -148,7 +171,7 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
             GOTO_FILE,
             QUICK,
             COMPLETE,
-            FIND_IN_FILES,
+            GIT_VIEW,
             h("Ctrl+F/G", "find / go to line"),
             h("Ctrl+B", "go to definition"),
             h("Alt+1/F12", "project / terminal"),
@@ -280,6 +303,7 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
         ] },
         Ctx::AgentsRuns => const { &[
             h("↑/↓", "pick a run"),
+            h("Ctrl+D", "what it changed (review)"),
             h("Enter", "follow-up"),
             h("Ctrl+C", "stop"),
             h("Del", "remove from list"),
@@ -290,6 +314,7 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
             h("↑/↓", "scroll"),
             h("PgUp/PgDn", "page"),
             h("End", "follow the end"),
+            h("Ctrl+D", "what this run changed"),
             h("Tab", "prompt"),
             h("Esc", "editor"),
         ] },
@@ -302,6 +327,52 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
         ] },
         Ctx::List => const { &[h("a-z", "filter"), h("↑/↓", "select"), h("Enter", "open"), h("Esc", "close")] },
         Ctx::Prompt => const { &[h("Enter", "confirm"), h("Esc", "cancel"), h("Backspace", "delete")] },
+        Ctx::GitChanges => const { &[
+            h("F7/Shift+F7", "next / prev change"),
+            h("Tab/Shift+Tab", "next / prev file"),
+            h("s/S", "stage hunk / file"),
+            h("r/R", "revert hunk / file"),
+            h("u", "undo the revert"),
+            h("v", "side by side"),
+            h("a", "review an agent run"),
+            h("Enter", "open in editor"),
+        ] },
+        Ctx::GitLog => const { &[
+            h("↑/↓", "select"),
+            h("Enter", "commit details"),
+            h("/", "filter"),
+            h("h", "this file's history"),
+            h("y", "copy hash"),
+            h("B", "branches"),
+            h("P/U/F", "push / pull / fetch"),
+            h("1", "changes"),
+        ] },
+        Ctx::GitCommit => const { &[
+            h("F7/Shift+F7", "next / prev change"),
+            h("Tab/Shift+Tab", "next / prev file"),
+            h("v", "side by side"),
+            h("Enter", "open in editor"),
+            h("y", "copy hash"),
+            h("Esc", "back to the log"),
+        ] },
+        Ctx::GitBranches => const { &[
+            h("↑/↓", "select"),
+            h("Enter", "switch (asks)"),
+            h("n", "new branch"),
+            h("r", "rename"),
+            h("d", "delete merged (asks)"),
+            h("Esc", "close"),
+        ] },
+        Ctx::GitConfirm => const { &[h("y/Enter", "yes, do it"), h("n/Esc", "no")] },
+        Ctx::GitInput => const { &[h("a-z", "type"), h("Enter", "apply"), h("Backspace", "delete"), h("Esc", "done")] },
+        Ctx::Blame => const { &[
+            h("Ctrl+L", "this line's commit"),
+            GOTO_FILE,
+            QUICK,
+            COMPLETE,
+            h("Ctrl+F/G", "find / go to line"),
+            UNDO_REDO,
+        ] },
     }
 }
 

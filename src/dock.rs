@@ -142,6 +142,7 @@ impl App {
             self.message = Some(m);
             changed = true;
         }
+        changed |= self.git_view_tick();
         changed | self.dock.git.take_changed()
     }
 

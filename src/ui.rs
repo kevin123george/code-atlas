@@ -76,9 +76,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let (text_area, dock_area) = crate::dock::split(text_area, &app.dock);
     let dock_cursor = dock_area.and_then(|r| crate::dock::draw(buf, app, r));
     let (text_area, panel_cursor) = crate::agents::ui::draw_panel(buf, app, text_area);
+    // The Git view covers the tree and the editor (not the agents panel: watch and review).
+    let view_area = text_area;
     let text_area = crate::project::ui::draw_sidebar(buf, app, text_area);
-    let cursor = draw_text(buf, app, text_area).filter(|_| !app.project.focus_tree && !app.agents.focus && !app.dock.has_focus());
+    let cursor = draw_text(buf, app, text_area).filter(|_| !app.project.focus_tree && !app.agents.focus && !app.dock.has_focus() && !app.git_view.open);
     crate::dock::draw_over_editor(buf, app, text_area);
+    let view_cursor = crate::git::view_ui::draw(buf, app, view_area);
     crate::hints::ui::draw(buf, app, text_area);
 
     let status = Rect::new(area.x, area.bottom() - 1, area.width, 1);
@@ -86,7 +89,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let lsp_cursor = app.draw_lsp_popups(f.buffer_mut(), cursor, prompt_cursor.is_some(), area);
     let popup_cursor = crate::project::ui::draw_popup(f.buffer_mut(), &mut app.project, area);
 
-    if let Some(p) = popup_cursor.or(lsp_cursor).or(prompt_cursor).or(dock_cursor).or(panel_cursor).or(cursor) {
+    if let Some(p) = popup_cursor.or(lsp_cursor).or(prompt_cursor).or(dock_cursor).or(view_cursor).or(panel_cursor).or(cursor) {
         f.set_cursor_position(p);
     }
 }
@@ -97,6 +100,7 @@ pub fn block_cursor(app: &App) -> bool {
         && app.project.popup.is_none()
         && !app.project.focus_tree
         && !app.dock.has_focus()
+        && !app.git_view.open
         && !app.lsp.picker_open()
         && app.vim.as_ref().is_some_and(|v| v.cmdline().is_none() && v.mode != Mode::Insert)
 }
@@ -141,6 +145,14 @@ fn draw_text(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
     let diags = app.diag_spans();
     let d = &mut app.docs[app.active];
     let marks = app.dock.git.marks(d.path.as_deref());
+    // Blame (git view `b`): its own columns left of the line numbers.
+    let blame = app.git_view.blames.get(d.path.as_deref()).filter(|_| area.width > crate::git::blame::WIDTH + 20);
+    let blame_x = area.x;
+    let area = match blame {
+        Some(_) => Rect::new(area.x + crate::git::blame::WIDTH, area.y, area.width - crate::git::blame::WIDTH, area.height),
+        None => area,
+    };
+    let now = crate::git::log::now();
     let total = d.visible_lines();
     let gutter_w = (total.to_string().len().max(3) + 2) as u16;
     let text_x = area.x + gutter_w;
@@ -164,6 +176,9 @@ fn draw_text(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
             continue;
         }
         let is_cur = line == cur_line;
+        if let Some(b) = blame {
+            crate::git::blame::draw_cell(buf, blame_x, y, b, line, is_cur, now);
+        }
         let line_bg = if is_cur { SURFACE_1 } else { PAPER };
         buf.set_style(Rect::new(area.x, y, area.width, 1), Style::new().bg(line_bg));
         let num_style = if is_cur { Style::new().fg(ACCENT) } else { Style::new().fg(MUTED) };

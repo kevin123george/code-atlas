@@ -102,6 +102,22 @@ pub fn context(app: &App) -> Ctx {
     if app.prompt.is_some() {
         return Ctx::Prompt;
     }
+    if app.git_view_focused() {
+        let v = &app.git_view;
+        return if v.confirm.is_some() {
+            Ctx::GitConfirm
+        } else if v.input.is_some() {
+            Ctx::GitInput
+        } else if v.branches.is_some() {
+            Ctx::GitBranches
+        } else {
+            match v.tab {
+                crate::git::view::Tab::Changes => Ctx::GitChanges,
+                crate::git::view::Tab::Log if v.details.is_some() => Ctx::GitCommit,
+                crate::git::view::Tab::Log => Ctx::GitLog,
+            }
+        };
+    }
     if let Some(p) = &app.project.popup {
         return match p.kind {
             PopupKind::Files => Ctx::GotoFile,
@@ -137,6 +153,9 @@ pub fn context(app: &App) -> Ctx {
     }
     if app.doc().selection().is_some() {
         return Ctx::Selection;
+    }
+    if app.git_view.blames.get(app.doc().path.as_deref()).is_some() {
+        return Ctx::Blame;
     }
     Ctx::Idea
 }

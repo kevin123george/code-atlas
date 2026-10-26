@@ -89,6 +89,8 @@ pub struct Agents {
     pub prompt_rect: Rect,
     /// First run shown in the list (scroll).
     pub runs_scroll: usize,
+    /// "3 files +42 −7 since the run started", counted after each turn (run id, result).
+    stat_jobs: Vec<(u64, Receiver<Option<String>>)>,
 }
 
 /// Where runs are saved: `$CATLAS_CONFIG_DIR`, else `$XDG_CONFIG_HOME/code-atlas`, else
@@ -150,6 +152,7 @@ impl Agents {
             transcript_rect: Rect::default(),
             prompt_rect: Rect::default(),
             runs_scroll: 0,
+            stat_jobs: Vec::new(),
         }
     }
 
@@ -542,6 +545,14 @@ impl App {
         if !self.agents.focus || !self.agents.visible || self.project.popup.is_some() {
             return false;
         }
+        // Ctrl+D: review what the selected run changed (git view, decision 0012).
+        if ctrl && !alt && ch('d') {
+            match self.agents.selected {
+                Some(id) => self.review_run(id),
+                None => self.message = Some("Pick a run first (Tab to the list, ↑↓), then Ctrl+D shows what it changed".into()),
+            }
+            return true;
+        }
         let d = &self.docs[self.active];
         let root = self.project.root.clone();
         let ctx = || file_context(d, &root);
@@ -560,8 +571,8 @@ impl App {
         }
         match self.agents.area {
             Area::Prompt => "Enter send · Alt+Enter newline · Alt+M mode · Alt+A agent · Alt+I file · Tab list · Esc editor".into(),
-            Area::Runs => "↑↓ pick a run · Enter write a follow-up · Ctrl+N new · Ctrl+C stop · Del remove · Esc editor".into(),
-            Area::Transcript => "↑↓ PgUp PgDn scroll · End follow · Tab prompt · Esc editor".into(),
+            Area::Runs => "↑↓ pick a run · Ctrl+D what it changed · Enter follow-up · Ctrl+N new · Ctrl+C stop · Del remove · Esc editor".into(),
+            Area::Transcript => "↑↓ PgUp PgDn scroll · End follow · Ctrl+D what this run changed · Tab prompt · Esc editor".into(),
         }
     }
 
@@ -599,6 +610,25 @@ impl App {
                 redraw = true;
             }
         }
+        // Change counts since each run's snapshot.
+        let mut done_stats = Vec::new();
+        a.stat_jobs.retain(|(id, rx)| match rx.try_recv() {
+            Ok(s) => {
+                done_stats.push((*id, s));
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(_) => false,
+        });
+        for (id, stat) in done_stats {
+            if let (Some(i), Some(s)) = (a.run_index(id), stat) {
+                let r = &mut a.runs[i];
+                r.entries.push(run::Entry::Info { text: format!("since the run started: {s} · Ctrl+D reviews it") });
+                r.stat = Some(s);
+                redraw = true;
+                a.save();
+            }
+        }
         let mut files = Vec::new();
         let mut save = false;
         let mut finished = Vec::new();
@@ -613,6 +643,15 @@ impl App {
         }
         if save {
             a.save();
+        }
+        for (id, _, _) in &finished {
+            let Some(r) = a.run_index(*id).map(|i| &a.runs[i]) else { continue };
+            let (Some(base), cwd) = (r.base.clone(), r.cwd.clone()) else { continue };
+            a.stat_jobs.push((*id, crate::git::job(move || {
+                let root = crate::git::toplevel(&cwd)?;
+                let (f, add, del) = crate::git::review::run_stat(&root, &base.tree).ok()?;
+                Some(crate::git::patch::stat_label(f, add, del))
+            })));
         }
         if a.visible {
             a.staff.maybe_refresh();
