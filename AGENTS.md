@@ -86,7 +86,9 @@ highlighting only.
   `config.rs` `languages.toml` layers, merging, file → language, server selection, `${var}` expansion;
   `languages.toml` the built-in table; `health.rs` `catlas --health`; `server.rs` project root, PATH lookup,
   process + threads, `CATLAS_LSP_LOG`; `jsonrpc.rs` framing; `text.rs` UTF-16 positions, file URIs, applying
-  `TextEdit`s; `snippet.rs` LSP snippet parser (tab stops); `popup.rs` completion / hover / quick-fix popups,
+  `TextEdit`s; `snippet.rs` LSP snippet parser (tab stops); `auto.rs` completion as you type (debounce,
+  trigger characters, stale answers, Ctrl+J, merging words, decision 0011); `words.rs` word completion from the
+  open buffers; `popup.rs` completion / hover / quick-fix popups,
   signature line, centred pickers (usages, structure, symbols, implementations, problems). Hooks elsewhere: `Doc.syntax`, `Doc::rev`/`edit_with`/
   `set_path`/`line_span` (pub), `App.lsp`, `smart_key`/`smart_after_key` in `App::handle`, `PromptKind::Rename`,
   `lsp_did_save` in `App::save`, Ctrl+/ in `App::key`, `app.lsp_tick()` in the main loop (30 ms poll, draws only
@@ -120,7 +122,8 @@ highlighting only.
   Hooks elsewhere: `App.hints`, `hints_key` first in `App::handle`, `hints_before`/`hints_mouse` around the mouse
   handlers, `hints::ui::draw` in `ui::draw` (after the editor, before popups), `theme::GHOST`, `--no-hints` and
   `app.hints.kitty = enhanced` in `main.rs`; `Terminal::feed` (tests only).
-- `src/config.rs` – `settings.toml` (`hints = true`) in the config folder: load (defaults on any problem), save one key.
+- `src/config.rs` – `settings.toml` (`hints = true`, `autocomplete = true`) in the config folder: load (defaults on any
+  problem, field by field), save one key.
 - `src/mackeys.rs` – macOS keys terminals mangle (decision 0010): Cmd chords with SUPER → Ctrl twins
   (editor only), `Ω`/`¸` (Option+Z without Option as Meta) → redo right after an undo. Hook: `App::handle`
   (editor branch) and `App.undo_chain`, set by the undo/redo arms in `idea_key`.
@@ -219,7 +222,7 @@ used where the real key works shows "Tip: key" at its top for 3 s.
 | Key | Does |
 |---|---|
 | Ctrl+/ (also arrives as Ctrl+7, Ctrl+_) | comment / uncomment the line or selected lines (`//`, `#` or `--` for Lua/SQL; XML, DTD, HTML, Markdown wrap each line in `<!-- -->`, CSS in `/* */`; JSON has none) |
-| Ctrl+Space | completion; also opens by itself after `.` (and `::` in Rust). ↑↓ PgUp PgDn, **Enter** inserts, **Tab** replaces the rest of the word, Esc close, typing filters (fuzzy). Functions come with `()` (cursor inside) or the server's snippet: its placeholders are selected one by one, **Tab / Shift+Tab** next / previous, the last Tab lands after it, Esc ends |
+| Ctrl+Space, **Ctrl+J** (Mac: macOS takes Ctrl+Space), Ctrl+@ | completion. **Opens by itself** while you type a name (100 ms pause; 1+ letters with a server, 2+ for buffer words; not in comments/strings, plain text or Markdown) and at once after the server's trigger characters (`.`, `::` …). ↑↓ PgUp PgDn, **Enter** inserts (a word that is typed out already: new line), **Tab** replaces the rest of the word, **Esc** closes (and it stays shut for that word), typing filters (fuzzy). Without a server: words from the open files (kind `w`), nearest first; with a server that has < 10 matches they come under its items. Functions come with `()` (cursor inside) or the server's snippet: its placeholders are selected one by one, **Tab / Shift+Tab** next / previous, the last Tab lands after it, Esc ends. `autocomplete = false` in `settings.toml` keeps only the keys |
 | (typing `(` or `,`) | signature help above the line, current parameter in bold accent; follows typing, closes off the line or with Esc |
 | Ctrl+B | go to definition (opens or switches the tab; several → a list) · **Ctrl+Alt+←** back |
 | Ctrl+Alt+B | go to implementation(s) (one jumps, several → a list) |
@@ -236,7 +239,7 @@ used where the real key works shows "Tip: key" at its top for 3 s.
 Diagnostics: ● in the gutter (red error, yellow warning, blue info; hints hidden), coloured underline, and the
 message in the status bar when the cursor is on it.
 In Vim normal/visual mode Ctrl+B stays Vim's page up and `.` stays repeat: go to definition is **Ctrl+]** there,
-and completion opens by itself only in insert mode. The language name sits before the IDEA/Vim mode badge. Server progress ("rust-analyzer: Indexing 40%") shows there too.
+and completion opens by itself only in insert mode (Ctrl+J stays Vim's line down in normal mode). The language name sits before the IDEA/Vim mode badge. Server progress ("rust-analyzer: Indexing 40%") shows there too.
 
 - New features go in their own module (`src/<feature>/…`) with a small hook in `app.rs`/`ui.rs`, so parallel work
   doesn't collide.
@@ -348,6 +351,12 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 - tmux drops a trailing `;` of `send-keys -l` (see above): in manual LSP checks type `\;`.
 - rust-analyzer needs ~1–2 min to index this crate on the Mac before diagnostics/definitions come; cargo-check
   diagnostics come after a save (didSave).
+- Completion on a Mac: Ctrl+Space is macOS's "Select the previous input source" (System Settings → Keyboard →
+  Keyboard Shortcuts → Input Sources); the OS takes it before the terminal, kitty protocol or not. Use **Ctrl+J**
+  (or untick that shortcut). Ctrl+@ (Ctrl+Shift+2) sends NUL, which crossterm reads as Ctrl+Space.
+- Completion as you type is scheduled in `smart_after_key` (`auto_after_key`) and sent from `lsp_tick`
+  (`auto_tick`), not from `App::tick`: unit tests that only call `tick()` never see automatic popups; the
+  `lsp::auto` tests call `auto_tick` with a time.
 - Cmd+Z doesn't reach terminal programs by default on macOS: Ghostty 1.3 binds `super+z=undo` itself
   (`ghostty +list-keybinds --default`), iTerm2/Terminal.app use it in their menus. crossterm only sees
   Cmd (`KeyModifiers::SUPER`) through the kitty protocol. Option+Z types `Ω` without "Option as Meta".
@@ -369,6 +378,7 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
   bracketed paste (Cmd+V / Ctrl+Shift+V), Ctrl+V pastes the editor's own clipboard.
 
 ## Decisions
+`docs/decisions/0011-autocomplete.md` – completion as you type (100 ms pause, server trigger characters, not in comments/strings/prose, newest answer only), Ctrl+J / Ctrl+@ next to Ctrl+Space (macOS takes it), Enter on a typed-out word = new line, word completion from open buffers (alone or under few server items), `autocomplete` setting.
 `docs/decisions/0010-mac-undo-and-xml.md` – Cmd+Z/Cmd chords via SUPER (editor only), Ω-after-undo redo, Alt+Shift+Z, "Nothing to undo", no-op edits make no undo step, XML/DTD highlighting (tree-sitter-xml), per-line `<!-- -->` comments, lemminx entry.
 `docs/decisions/0009-quick-search.md` – Search Everywhere: Ctrl+T (+ Alt+S/Alt+Space, Mac NBSP), FILES + TEXT sections, tabs, folder scope from the tree, tree follow with snapshot/Esc restore, speed search.
 `docs/decisions/0008-shortcut-helper.md` – key-hints: glass panel bottom right, 20 contexts, fallbacks by kitty, Alt+/ + `settings.toml`, Key Promoter tips, `table.rs` as the single source with a binding test.
@@ -381,6 +391,14 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 `docs/decisions/0007-more-language-servers.md` – languages.toml layers + merge rules, server per language, fallback on a failed start, `also` servers, snippets, pull diagnostics, new keys, what was installed.
 
 ## Current state (2026-10-26)
+Completion as you type done 2026-10-26 (autocomplete, decision 0011, see Keys (code smarts)): the list opens by
+itself after a 100 ms pause in a name and on the server's trigger characters, stale answers dropped by sequence
+number, Ctrl+J (and Ctrl+@) where macOS takes Ctrl+Space, words from the open buffers without a server and under
+few server items, `autocomplete = true|false` in `settings.toml`. Checked live on the Mac: rust-analyzer 1.94.1
+(component installed; `catlas --health`: 17 of 22 languages ready, rust-analyzer used from `~/.cargo/bin`),
+pyright, TypeScript (`tsc --lsp`). Tests: unit (`src/lsp/auto.rs`, `words.rs`, `Syntax::in_comment_or_string`,
+settings, hint tip on a Mac; 261 in all), e2e `scenarios/autocomplete.sh` (4 scenarios, 58 in all). Not done:
+completion item resolve (docs), a delay/min-length setting, words from files that aren't open.
 Search Everywhere done 2026-10-26 (quick-search, decision 0009, see Keys (project view)): Ctrl+T popup with
 file names and contents at once (FILES / TEXT sections, All/Files/Text tabs, `name:42`), folder scope from the
 tree, the tree following the selection in every project popup (Esc restores), Alt+F1 reveal, IDEA speed

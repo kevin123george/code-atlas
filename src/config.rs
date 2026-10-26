@@ -3,7 +3,8 @@
 //! and `agents.json`). Minimal on purpose (M7 brings the full settings file):
 //!
 //! ```toml
-//! hints = true   # the shortcut helper in the bottom-right corner (Alt+/ toggles and saves it)
+//! hints = true          # the shortcut helper in the bottom-right corner (Alt+/ toggles and saves it)
+//! autocomplete = true   # completion opens by itself while typing (Ctrl+Space / Ctrl+J always work)
 //! ```
 //!
 //! A missing, unreadable or broken file gives the defaults. Saving keeps the other keys in the file.
@@ -13,11 +14,12 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     pub hints: bool,
+    pub autocomplete: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { hints: true }
+        Settings { hints: true, autocomplete: true }
     }
 }
 
@@ -35,6 +37,9 @@ impl Settings {
         };
         if let Some(b) = table.get("hints").and_then(|v| v.as_bool()) {
             s.hints = b;
+        }
+        if let Some(b) = table.get("autocomplete").and_then(|v| v.as_bool()) {
+            s.autocomplete = b;
         }
         s
     }
@@ -65,13 +70,15 @@ mod tests {
     fn defaults_when_missing_or_broken() {
         let d = scratch("broken");
         let p = d.join("settings.toml");
-        assert_eq!(Settings::load(Some(&p)), Settings { hints: true });
-        assert_eq!(Settings::load(None), Settings { hints: true });
+        assert_eq!(Settings::load(Some(&p)), Settings { hints: true, autocomplete: true });
+        assert_eq!(Settings::load(None), Settings::default());
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(&p, "hints = [not toml").unwrap();
         assert!(Settings::load(Some(&p)).hints, "a broken file is ignored");
         std::fs::write(&p, "hints = \"no\"\n").unwrap();
         assert!(Settings::load(Some(&p)).hints, "a wrong type is ignored");
+        std::fs::write(&p, "autocomplete = false\n").unwrap();
+        assert_eq!(Settings::load(Some(&p)), Settings { hints: true, autocomplete: false }, "field by field");
         std::fs::remove_dir_all(d).unwrap();
     }
 

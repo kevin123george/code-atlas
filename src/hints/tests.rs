@@ -81,8 +81,8 @@ fn fallbacks_show_the_key_that_works_here() {
     let commit = table::rows(Ctx::Commit).iter().find(|h| h.does == "commit ticked").unwrap();
     assert_eq!((commit.shown(true), commit.shown(false)), ("Ctrl+Enter", "Alt+Enter"));
     // Keys every terminal sends stay the same.
-    let recent = table::rows(Ctx::Idea)[2];
-    assert_eq!((recent.shown(true), recent.shown(false)), ("Ctrl+E", "Ctrl+E"));
+    let complete = table::rows(Ctx::Idea)[2];
+    assert_eq!((complete.shown(true), complete.shown(false)), ("Ctrl+Space/J", "Ctrl+Space/J"), "macOS takes Ctrl+Space in every terminal");
     let ls = lines(table::rows(Ctx::Idea), false, None);
     assert!(ls.iter().any(|l| l.key == "Ctrl+P") && !ls.iter().any(|l| l.key.contains("Shift+N")));
     let ls = lines(table::rows(Ctx::Idea), true, None);
@@ -728,6 +728,14 @@ fn mouse_and_fallbacks_promote_their_keys() {
     app.hints.tip = None;
     keys(&mut app, "Alt+F");
     assert_eq!(app.hints.current_tip(Instant::now()), None);
+    // Ctrl+J (completion) with kitty: Ctrl+Space is promoted, except on a Mac, where macOS
+    // keeps Ctrl+Space for switching input sources.
+    keys(&mut app, "Esc");
+    app.hints.kitty = true;
+    app.hints.tip = None;
+    keys(&mut app, "Ctrl+J");
+    let tip = app.hints.current_tip(Instant::now()).map(|h| h.key);
+    assert_eq!(tip, if cfg!(target_os = "macos") { None } else { Some("Ctrl+Space") });
     drop(app);
     let _ = std::fs::remove_dir_all(&d);
 }

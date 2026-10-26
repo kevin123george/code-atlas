@@ -109,6 +109,9 @@ const LEAVE_VIM: Hint = h("Ctrl+Alt+V", "IDEA keys (leave Vim)");
 /// Mac, where Option+Z (Ω) right after an undo also redoes (decision 0010). Cmd+Z / Cmd+Shift+Z
 /// work too where the terminal passes them on.
 const UNDO_REDO: Hint = fb("Ctrl+(Shift+)Z", "Ctrl+Z/Alt+Z", "undo / redo");
+/// Completion (decision 0011): macOS takes Ctrl+Space for switching input sources, in every
+/// terminal, so Ctrl+J is always shown next to it.
+const COMPLETE: Hint = h("Ctrl+Space/J", "complete");
 
 /// The panel title for a context (some add a detail, see `super::title`).
 pub fn title(c: Ctx) -> &'static str {
@@ -144,7 +147,7 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
         Ctx::Idea => const { &[
             GOTO_FILE,
             QUICK,
-            h("Ctrl+E", "recent files"),
+            COMPLETE,
             FIND_IN_FILES,
             h("Ctrl+F/G", "find / go to line"),
             h("Ctrl+B", "go to definition"),
@@ -173,7 +176,7 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
         ] },
         Ctx::VimInsert => const { &[
             h("Esc", "normal mode"),
-            h("Ctrl+Space", "complete"),
+            COMPLETE,
             h("Ctrl+S", "save"),
             GOTO_FILE,
             h("Alt+F12", "terminal"),
@@ -310,7 +313,12 @@ pub const FALLBACKS: &[Hint] = &[
     fb("Ctrl+Shift+Z", "Alt+Z", "redo"),
     fb("Ctrl+Alt+Shift+N", "Alt+N", "go to symbol"),
     fb("Shift+F3", "Alt+P", "previous match"),
+    fb("Ctrl+Space", "Ctrl+J", "completion"),
 ];
+
+/// Fallback keys whose "real" key macOS keeps for itself (Ctrl+Space switches input sources):
+/// no tip for them on a Mac, the fallback is the key there.
+pub const MAC_TAKEN: &[&str] = &["Ctrl+Space"];
 
 /// Key Promoter tips for mouse actions that have a key.
 pub const TAB_SWITCH: Hint = h("Alt+←/→", "switch tab");

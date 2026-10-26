@@ -324,7 +324,8 @@ impl App {
                     | Ctx::QuickSearch
             );
             if editorish {
-                if let Some(h) = table::FALLBACKS.iter().find(|h| h.legacy.is_some_and(|l| matches(l, &k))) {
+                let mac_taken = |h: &&Hint| cfg!(target_os = "macos") && table::MAC_TAKEN.contains(&h.key);
+                if let Some(h) = table::FALLBACKS.iter().filter(|h| !mac_taken(h)).find(|h| h.legacy.is_some_and(|l| matches(l, &k))) {
                     self.hints.promote(*h, Instant::now());
                 }
             }

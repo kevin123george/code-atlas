@@ -91,6 +91,9 @@ impl App {
         }
         project.focus_tree = as_project && paths.is_empty();
         let dock = crate::dock::Dock::new(&project.root);
+        let settings = crate::config::Settings::load(if cfg!(test) { None } else { crate::config::settings_path() }.as_deref());
+        let mut lsp = crate::lsp::Lsp::default();
+        lsp.auto = settings.autocomplete;
         Ok(App {
             agents: crate::agents::Agents::new(project.root.clone()),
             dock,
@@ -108,7 +111,7 @@ impl App {
             dragging: false,
             follow: true,
             vim: None,
-            lsp: Default::default(),
+            lsp,
             hints: crate::hints::Hints::load(),
             undo_chain: false,
         })

@@ -55,7 +55,8 @@ fn log(f: &Option<std::fs::File>, dir: &str, bytes: &[u8]) {
 /// What a request was for, so its response can be handled.
 pub enum Pending {
     Initialize,
-    Completion { path: PathBuf, start: usize, req: lsp_types::Position },
+    /// `seq` = the request's number (only the newest is shown); `auto` = opened by typing.
+    Completion { path: PathBuf, start: usize, req: lsp_types::Position, seq: u64, auto: bool },
     /// Definition or implementation (`what`), for the word at the cursor.
     Definition { what: &'static str, word: String },
     References { word: String },

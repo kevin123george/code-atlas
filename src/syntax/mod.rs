@@ -381,6 +381,43 @@ impl Syntax {
         self.source = new;
     }
 
+    /// Whether the character before char offset `at` lies in a comment or a string literal, for
+    /// languages where completion inside those is noise (code, not data or markup: JSON keys,
+    /// XML text and HTML attributes are strings or text there and do get completion). An
+    /// interpolation inside a string (`${x}`, f-string `{x}`, `$VAR`) counts as code.
+    pub fn in_comment_or_string(&mut self, rope: &Rope, rev: u64, at: usize) -> bool {
+        let code = matches!(
+            self.lang,
+            Lang::Rust | Lang::TypeScript | Lang::Tsx | Lang::JavaScript | Lang::Java | Lang::Kotlin | Lang::Python | Lang::Go | Lang::C | Lang::Cpp | Lang::Bash | Lang::Lua
+        );
+        let comment_only = matches!(self.lang, Lang::Xml | Lang::Dtd | Lang::Html | Lang::Css | Lang::Yaml | Lang::Toml | Lang::Sql | Lang::Dockerfile);
+        if (!code && !comment_only) || at == 0 || at > rope.len_chars() {
+            return false;
+        }
+        self.update(rope, rev);
+        let Some(tree) = self.tree.as_ref() else { return false };
+        if self.source.len() != rope.len_bytes() {
+            return false;
+        }
+        let b = rope.char_to_byte(at - 1);
+        let Some(mut node) = tree.root_node().descendant_for_byte_range(b, b + 1) else { return false };
+        loop {
+            // tree-sitter-xml capitalises its kinds (`Comment`).
+            let k = node.kind().to_ascii_lowercase();
+            let k = k.as_str();
+            if k.contains("interpolation") || k.contains("substitution") || k.contains("expansion") || k == "interpolated_expression" {
+                return false;
+            }
+            if k.contains("comment") || (code && (k.contains("string") || k == "char_literal")) {
+                return true;
+            }
+            match node.parent() {
+                Some(p) => node = p,
+                None => return false,
+            }
+        }
+    }
+
     /// Tokens for lines `first .. first + count` (clamped to the document). Call [`update`](Self::update) first.
     pub fn visible(&mut self, rope: &Rope, first: usize, count: usize) -> &[Vec<Option<Token>>] {
         let rev = self.rev.unwrap_or(0);
@@ -696,5 +733,25 @@ mod tests {
         eprintln!("5000+ lines: first parse+highlight {initial:?}, per keystroke {per_key:?}");
         // Generous for unoptimised test builds; release is far below this.
         assert!(per_key < std::time::Duration::from_millis(60), "per keystroke {per_key:?}");
+    }
+
+    #[test]
+    fn comments_and_strings_for_completion() {
+        // `|` marks the cursor.
+        let check = |lang: Lang, text: &str| {
+            let mut s = Syntax::new(lang);
+            let rope = Rope::from_str(&text.replace('|', ""));
+            let at = text[..text.find('|').unwrap()].chars().count();
+            s.in_comment_or_string(&rope, 1, at)
+        };
+        assert!(check(Lang::Rust, "fn a() {} // com|ment\n"));
+        assert!(check(Lang::Rust, "let s = \"str|ing\";\n"));
+        assert!(!check(Lang::Rust, "let s = val|ue;\n"));
+        assert!(!check(Lang::Python, "x = f\"{na|me}\"\n"), "f-string interpolation is code");
+        assert!(check(Lang::Python, "x = f\"te|xt {name}\"\n"));
+        assert!(!check(Lang::TypeScript, "const s = `a ${na|me}`;\n"), "template substitution is code");
+        assert!(check(Lang::Xml, "<a/>\n<!-- no|te -->\n"));
+        assert!(!check(Lang::Json, "{ \"ke|y\": 1 }\n"), "JSON keys are completed by the server");
+        assert!(!check(Lang::Plain, "anything|\n"));
     }
 }

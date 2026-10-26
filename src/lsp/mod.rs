@@ -6,13 +6,15 @@
 //! usages, file structure, workspace symbols, hover, rename, format and quick fixes. JSON-RPC runs
 //! over stdio in background threads; [`App::lsp_tick`] handles what arrived, once per loop turn.
 //!
-//! Keys (IntelliJ): Ctrl+Space complete (also after `.` and `::`; Tab / Shift+Tab walk a
-//! snippet's placeholders), Ctrl+B go to definition, Ctrl+Alt+B implementations, Ctrl+Alt+←
+//! Keys (IntelliJ): Ctrl+Space complete (Ctrl+J on a Mac; it also opens by itself while typing
+//! and after the server's trigger characters, see [`auto`]; Tab / Shift+Tab walk a snippet's
+//! placeholders), Ctrl+B go to definition, Ctrl+Alt+B implementations, Ctrl+Alt+←
 //! back, Alt+F7 usages, Ctrl+F12 file structure, Ctrl+Alt+Shift+N (Alt+N) symbol in the
 //! workspace, F2 / Shift+F2 next / previous problem, Alt+6 the file's problems, F1 quick
 //! documentation (IDEA's Ctrl+Q is quit here), Shift+F6 rename, Ctrl+Alt+L reformat, Alt+Enter
 //! quick fixes; signature help opens by itself after `(` and `,`.
 
+pub mod auto;
 pub mod config;
 pub mod health;
 pub mod jsonrpc;
@@ -20,6 +22,7 @@ pub mod popup;
 pub mod server;
 pub mod snippet;
 pub mod text;
+pub mod words;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -28,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lsp_types::{
-    CompletionResponse, DocumentChangeOperation, DocumentChanges, GotoDefinitionResponse, Hover, HoverContents,
+    DocumentChangeOperation, DocumentChanges, GotoDefinitionResponse, Hover, HoverContents,
     MarkedString, OneOf, Position, Range, TextEdit, WorkspaceEdit,
 };
 use serde_json::{json, Value};
@@ -37,7 +40,7 @@ use crate::app::{App, Prompt, PromptKind};
 use crate::doc::Doc;
 use crate::syntax::Lang;
 use jsonrpc::Incoming;
-use popup::{Item, PickItem, PickKind, Picker, Popup, Signature};
+use popup::{PickItem, PickKind, Picker, Popup, Signature};
 use server::{Event, Pending, Server};
 use text::{apply_edits, from_lsp, path_to_uri, to_lsp, uri_to_path};
 
@@ -94,6 +97,14 @@ pub struct Lsp {
     /// Code-action answers still expected (several servers may answer).
     actions_waiting: usize,
     seq: u64,
+    /// Completion opens by itself while typing (`autocomplete` in `settings.toml`).
+    pub auto: bool,
+    /// An automatic completion request waiting for a pause in typing.
+    auto_at: Option<auto::AutoReq>,
+    /// Number of the newest completion request (older answers are dropped).
+    comp_seq: u64,
+    /// (doc, word start) whose popup was closed with Esc: it doesn't open by itself again.
+    auto_off: Option<(usize, usize)>,
 }
 
 impl Default for Lsp {
@@ -117,6 +128,10 @@ impl Default for Lsp {
             snippet: None,
             actions_waiting: 0,
             seq: 0,
+            auto: true,
+            auto_at: None,
+            comp_seq: 0,
+            auto_off: None,
         }
     }
 }
@@ -255,6 +270,7 @@ impl App {
             }
         }
         self.lsp_sync(None);
+        changed |= self.auto_tick(Instant::now());
         changed
     }
 
@@ -537,26 +553,7 @@ impl App {
                 }
                 self.pull_all(sid);
             }
-            Pending::Completion { path, start, req } => {
-                let here = self.doc().path.clone().map(|p| self.lsp.key(&p));
-                if here.as_ref() != Some(&path) {
-                    return;
-                }
-                let d = self.doc();
-                if d.cursor < start || d.rope.char_to_line(d.cursor) != d.rope.char_to_line(start) {
-                    return;
-                }
-                let (items, incomplete) = match serde_json::from_value::<Option<CompletionResponse>>(v).ok().flatten() {
-                    Some(CompletionResponse::Array(a)) => (a, false),
-                    Some(CompletionResponse::List(l)) => (l.items, l.is_incomplete),
-                    None => (Vec::new(), false),
-                };
-                let prefix = d.rope.slice(start..d.cursor).to_string();
-                let items: Vec<Item> = items.into_iter().map(Item::from_lsp).collect();
-                let popup = Popup::completion(items, start, incomplete, &prefix, req);
-                let empty = matches!(&popup, Popup::Completion { shown, .. } if shown.is_empty());
-                self.lsp.popup = if empty { None } else { Some(popup) };
-            }
+            Pending::Completion { path, start, req, seq, auto } => self.on_completion(path, start, req, seq, auto, v),
             Pending::Definition { what, word } => {
                 let locs: Vec<(String, Position)> = match serde_json::from_value::<Option<GotoDefinitionResponse>>(v).ok().flatten() {
                     Some(GotoDefinitionResponse::Scalar(l)) => vec![(l.uri.to_string(), l.range.start)],
@@ -770,18 +767,6 @@ impl App {
         if let Some(s) = self.lsp.server(sid) {
             s.request(method, params, p);
         }
-    }
-
-    fn request_completion(&mut self, trigger: Option<char>) {
-        let start = word_start(self.doc());
-        let Some(path) = self.doc().path.clone() else { return };
-        let path = self.lsp.key(&path);
-        let ctx = match trigger {
-            Some(c) => json!({ "context": { "triggerKind": 2, "triggerCharacter": c.to_string() } }),
-            None => json!({ "context": { "triggerKind": 1 } }),
-        };
-        let req = to_lsp(&self.doc().rope, self.doc().cursor);
-        self.request_here("textDocument/completion", ctx, Pending::Completion { path, start, req });
     }
 
     pub fn lsp_rename(&mut self, new_name: String) {
@@ -1345,6 +1330,9 @@ impl App {
             let list = !matches!(p, Popup::Hover { .. });
             match k.code {
                 KeyCode::Esc => {
+                    if matches!(p, Popup::Completion { .. }) {
+                        self.completion_dismissed();
+                    }
                     self.lsp.popup = None;
                     return true;
                 }
@@ -1363,6 +1351,11 @@ impl App {
                 KeyCode::PageDown => {
                     p.move_sel(8);
                     return true;
+                }
+                // Enter on an item that is typed out already is a new line (and closes the list).
+                KeyCode::Enter if !alt && !ctrl && completion_adds_nothing(p, self.docs[self.active].cursor, &self.docs[self.active].rope) => {
+                    self.lsp.popup = None;
+                    return false;
                 }
                 KeyCode::Enter | KeyCode::Tab if list && !alt => {
                     let replace = k.code == KeyCode::Tab;
@@ -1388,6 +1381,9 @@ impl App {
         }
         if k.code == KeyCode::Esc {
             // Closes signature help and ends a snippet, then does what Esc always does (Vim!).
+            if self.lsp.auto_at.is_some() {
+                self.completion_dismissed();
+            }
             self.lsp.signature = None;
             self.lsp.snippet = None;
             return false;
@@ -1408,8 +1404,11 @@ impl App {
         // Vim normal/visual mode keeps Ctrl+B (page up) and gets Vim's Ctrl+] for go to definition.
         let vim_cmd = self.vim.as_ref().is_some_and(|v| !matches!(v.mode, crate::vim::Mode::Insert));
         let def = |word: String| Pending::Definition { what: "definition", word };
+        if auto::is_complete_key(&k, vim_cmd) {
+            self.request_completion(None, false);
+            return true;
+        }
         match k.code {
-            KeyCode::Char(' ') if ctrl => self.request_completion(None),
             KeyCode::Char(']') | KeyCode::Char('5') if ctrl && vim_cmd => {
                 let w = word_at(self.doc());
                 self.request_here("textDocument/definition", json!({}), def(w))
@@ -1446,8 +1445,8 @@ impl App {
         true
     }
 
-    /// After a normal key: keep the completion list in step with typing, auto-complete after
-    /// `.`/`::`, signature help after `(`/`,`, snippet stops following the typing.
+    /// After a normal key: keep the completion list in step with typing, completion as you type
+    /// ([`auto`]), signature help after `(`/`,`, snippet stops following the typing.
     pub fn smart_after_key(&mut self, k: KeyEvent) {
         self.snippet_track();
         let plain = !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
@@ -1465,8 +1464,10 @@ impl App {
                     }
                     let empty = matches!(&self.lsp.popup, Some(Popup::Completion { shown, .. }) if shown.is_empty());
                     if incomplete {
-                        self.request_completion(None);
+                        self.request_completion(None, true);
                     } else if empty {
+                        // Nothing left to offer for this word: don't ask again while it's typed.
+                        self.lsp.auto_off = Some((self.active, start));
                         self.lsp.popup = None;
                     }
                 }
@@ -1483,13 +1484,8 @@ impl App {
             }
         }
         let mut sig_asked = false;
+        self.auto_after_key(k, typing);
         if let (KeyCode::Char(c), true, true, true) = (k.code, plain, typing, smart) {
-            let d = self.doc();
-            let prev = d.cursor.checked_sub(2).map(|p| d.rope.char(p));
-            let trigger = c == '.' || (c == ':' && prev == Some(':') && matches!(lang, Lang::Rust));
-            if trigger && self.lsp.popup.is_none() {
-                self.request_completion(Some(c));
-            }
             if self.sig_triggers().iter().any(|t| t.starts_with(c)) {
                 self.request_signature(Some(c));
                 sig_asked = true;
@@ -1522,6 +1518,13 @@ impl App {
             None => None,
         }
     }
+}
+
+/// Whether the selected completion item would insert only what is typed already.
+fn completion_adds_nothing(p: &Popup, cursor: usize, rope: &ropey::Rope) -> bool {
+    let Popup::Completion { items, shown, sel, start, .. } = p else { return false };
+    let Some(it) = shown.get(*sel).map(|&i| &items[i]) else { return false };
+    cursor >= *start && it.adds_nothing(&rope.slice(*start..cursor).to_string())
 }
 
 /// `p` relative to the project root when inside it.

@@ -29,6 +29,8 @@ pub struct Item {
     pub edit_end: Option<lsp_types::Position>,
     pub replace_end: Option<lsp_types::Position>,
     pub extra: Vec<TextEdit>,
+    /// A word from the open buffers (no server): its distance from the cursor, for ranking.
+    pub word: Option<u32>,
 }
 
 impl Item {
@@ -61,7 +63,42 @@ impl Item {
             edit_end,
             replace_end,
             extra: c.additional_text_edits.unwrap_or_default(),
+            word: None,
         }
+    }
+
+    /// A word from the open buffers. `replace_end` = the end of the word after the cursor (Tab
+    /// replaces it); the detail names the other file it came from.
+    pub fn word(w: &super::words::Word, replace_end: Option<lsp_types::Position>) -> Item {
+        Item {
+            label: w.text.clone(),
+            detail: w.from.clone().unwrap_or_default(),
+            kind: "w",
+            insert: Snippet { text: w.text.clone(), stops: Vec::new() },
+            auto_parens: false,
+            filter: w.text.clone(),
+            sort: String::new(),
+            edit_start: None,
+            edit_end: None,
+            replace_end,
+            extra: Vec::new(),
+            word: Some(w.prox),
+        }
+    }
+
+    /// The name it is filtered on (`increment_by` for a label like `increment_by(…)`).
+    pub fn name(&self) -> &str {
+        &self.filter
+    }
+
+    /// Whether it matches what is typed (fuzzy, on its filter text).
+    pub fn matches(&self, typed: &str) -> bool {
+        fuzzy(typed, &self.filter)
+    }
+
+    /// Accepting it would only insert what is typed already (Enter then makes a new line).
+    pub fn adds_nothing(&self, typed: &str) -> bool {
+        self.insert.text == typed && self.insert.stops.is_empty() && !self.auto_parens && self.extra.is_empty()
     }
 }
 
@@ -189,11 +226,19 @@ impl Popup {
         if let Popup::Completion { items, shown, sel, prefix, .. } = self {
             *prefix = typed.to_string();
             let lower = typed.to_lowercase();
-            let mut v: Vec<usize> = (0..items.len()).filter(|&i| fuzzy(typed, &items[i].filter)).collect();
+            let mut v: Vec<usize> = (0..items.len()).filter(|&i| items[i].matches(typed)).collect();
+            // Server items keep the server's order (prefix matches first); words from the
+            // buffers come after them: prefix matches nearest first, then by fuzzy score.
+            let starts = |i: usize| items[i].filter.to_lowercase().starts_with(&lower);
+            let score = |i: usize| if starts(i) { 0 } else { crate::project::fuzzy::score(typed, &items[i].filter).map_or(0, |s| s.0) };
             v.sort_by(|&a, &b| {
                 let pa = !items[a].filter.to_lowercase().starts_with(&lower);
                 let pb = !items[b].filter.to_lowercase().starts_with(&lower);
-                pa.cmp(&pb).then_with(|| items[a].sort.cmp(&items[b].sort))
+                let (wa, wb) = (items[a].word, items[b].word);
+                wa.is_some().cmp(&wb.is_some()).then(pa.cmp(&pb)).then_with(|| match (wa, wb) {
+                    (Some(x), Some(y)) => score(b).cmp(&score(a)).then(x.cmp(&y)),
+                    _ => items[a].sort.cmp(&items[b].sort),
+                })
             });
             *shown = v;
             *sel = 0;
