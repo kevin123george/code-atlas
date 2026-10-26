@@ -17,7 +17,7 @@ kitty keyboard protocol (Ghostty, kitty, WezTerm, iTerm2 with "CSI u" on): it is
 Rust 2021 (Mac: `~/.cargo/bin`, not on PATH; laptop: pacman `rust`). `ratatui` 0.29 + `crossterm` 0.28 (screen,
 input), `ropey` (text buffer), `unicode-width`, `ignore` (ripgrep's gitignore-aware walker, project view),
 `tree-sitter` 0.27 + grammar crates (rust, typescript/tsx, javascript, java, kotlin-sg, python, go, c, cpp, bash,
-lua, json, yaml, toml-ng, html, css, md, containerfile, sequel; their bundled highlight queries) for highlighting,
+lua, json, yaml, toml-ng, html, css, md, containerfile, sequel, xml (+ DTD); their bundled highlight queries) for highlighting,
 `lsp-types` 0.97 + `serde_json` with an own JSON-RPC client (LSP), `toml` (`languages.toml`).
 `serde` + `serde_json` also for the agents panel (stream-json, `agents.json`); agents run the `claude` CLI.
 `portable-pty` 0.9 + `vt100` 0.15 (terminal pane; vt100 0.16 conflicts with ratatui's pinned `unicode-width`),
@@ -29,7 +29,9 @@ bash-language-server yaml-language-server vscode-langservers-extracted dockerfil
 (Homebrew node, global prefix `/opt/homebrew`), `brew install jdtls gopls lua-language-server shellcheck ruff`
 (jdtls pulled in brew's `openjdk`; the Mac also has JDK 17/21/23/24/25), `rustup component add rust-analyzer rustfmt`;
 clangd comes with the Xcode command line tools. Not installed: kotlin-language-server, marksman, taplo,
-basedpyright, pylsp. `catlas --health` shows what is found. Missing servers are skipped with a status message.
+basedpyright, pylsp, lemminx (XML; no Homebrew formula: native binary `lemminx-osx-aarch_64.zip` from the
+vscode-xml GitHub releases → `~/.local/bin/lemminx`, or the Maven Central uber jar behind a `java -jar`
+wrapper of that name, decision 0010). `catlas --health` shows what is found. Missing servers are skipped with a status message.
 
 ## Language servers
 `catlas --health [dir]` lists per language: highlighting, the configured servers, which one is used, its path and
@@ -39,7 +41,7 @@ version. Configuration = three layers, later ones win **field by field**: built-
 ```toml
 [language.python]                 # a catlas grammar name (rust, typescript, tsx, javascript, java, kotlin,
 servers = ["pyright", "pylsp"]    # python, go, c, cpp, bash, lua, json, yaml, toml, html, css, markdown,
-also = ["ruff"]                   # dockerfile, sql). servers: tried in order, the first found (and starting)
+also = ["ruff"]                   # dockerfile, sql, xml, dtd). servers: tried in order, the first found (and starting)
 roots = ["pyproject.toml"]        # is the main one; also: extra servers next to it (diagnostics + quick fixes)
 extensions = ["py", "pyi"]        # extensions, file names ("Dockerfile") or globs ("Dockerfile.*")
 
@@ -55,7 +57,8 @@ is ignored as a whole and shown as ERROR in `--health`. Built-in picks (decision
 typescript-language-server, then TypeScript 7's own `tsc --lsp --stdio` (`typescript-native`); Python pyright →
 basedpyright → pylsp, plus ruff; Java jdtls; Kotlin kotlin-language-server; Go gopls; C/C++ clangd; Bash
 bash-language-server (uses shellcheck); Lua lua-language-server; JSON/HTML/CSS vscode-*-language-server; YAML
-yaml-language-server; TOML taplo; Markdown marksman; Dockerfile docker-langserver; SQL highlighting only.
+yaml-language-server; TOML taplo; Markdown marksman; Dockerfile docker-langserver; XML/DTD lemminx; SQL
+highlighting only.
 
 ## Layout
 - `src/main.rs` – terminal setup/restore, event loop.
@@ -118,6 +121,9 @@ yaml-language-server; TOML taplo; Markdown marksman; Dockerfile docker-langserve
   handlers, `hints::ui::draw` in `ui::draw` (after the editor, before popups), `theme::GHOST`, `--no-hints` and
   `app.hints.kitty = enhanced` in `main.rs`; `Terminal::feed` (tests only).
 - `src/config.rs` – `settings.toml` (`hints = true`) in the config folder: load (defaults on any problem), save one key.
+- `src/mackeys.rs` – macOS keys terminals mangle (decision 0010): Cmd chords with SUPER → Ctrl twins
+  (editor only), `Ω`/`¸` (Option+Z without Option as Meta) → redo right after an undo. Hook: `App::handle`
+  (editor branch) and `App.undo_chain`, set by the undo/redo arms in `idea_key`.
 - `docs/ROADMAP.md` – milestones and who owns which files. `docs/decisions/` – project decisions.
 
 ## Run & test
@@ -157,7 +163,7 @@ None yet. Later: `cargo install --path .` on the Mac and the laptop.
 - Positions are **char offsets** into the rope; on-screen columns are display columns (`Doc::display_col`, tabs = 4).
 - Every edit goes through `Doc::begin(kind)` so undo works; runs of typing/deleting group into one step.
 - Keys follow IntelliJ's default Windows/Linux keymap (see `app.rs` `key()`); terminal-impossible keys get a
-  documented fallback (Ctrl+Shift+Z redo → also Alt+Z).
+  documented fallback (Ctrl+Shift+Z redo → also Alt+Z, Alt+Shift+Z, Ω right after an undo; see Keys (undo/redo)).
 - Colours only from `ui::theme` (M5 exceptions, kept local to avoid clashing with M3's theme edits: `git::ui`
   BLUE / ADD_BG / DEL_BG and the terminal's ANSI palette in `term::ui`). Line endings of a file are kept (LF/CRLF). Popups: centred box, `SURFACE_1`
   background, `ACCENT` title, selected row `SELECTION`.
@@ -166,6 +172,23 @@ None yet. Later: `cargo install --path .` on the Mac and the laptop.
   into a fresh `App` and fails on a key that does nothing there; keep that test green instead of loosening it.
 - Background work (walks, searches) runs on threads and streams through `mpsc` channels; `App::tick()` drains them
   before every draw (the loop wakes at least every 250 ms). Never block the main loop on the file system.
+
+## Keys (undo/redo, also on a Mac)
+| Terminal | Undo | Redo |
+|---|---|---|
+| any | Ctrl+Z | Ctrl+Shift+Z (kitty protocol only; elsewhere it arrives as Ctrl+Z and undoes), Alt+Z, Alt+Shift+Z |
+| Terminal.app, iTerm2 (defaults) | Ctrl+Z | **Option+Z right after an undo** (arrives as `Ω`, Option+Shift+Z as `¸`); Alt+Z needs "Use Option as Meta key" |
+| iTerm2 with CSI u / kitty protocol | Ctrl+Z | Ctrl+Shift+Z |
+| Ghostty, kitty, WezTerm (kitty protocol) | Ctrl+Z, **Cmd+Z** where the terminal passes it | Ctrl+Shift+Z, **Cmd+Shift+Z** |
+- Ghostty keeps Cmd+Z / Cmd+Shift+Z for its own undo (closed tabs); to give them to catlas add
+  `keybind = super+z=unbind` and `keybind = super+shift+z=unbind` to its config. iTerm2 / Terminal.app
+  use Cmd+Z themselves (iTerm2: map it in Settings → Keys → Key Bindings to "Send Hex Code" `0x1a`).
+- With SUPER, Cmd+S / Cmd+A / Cmd+C / Cmd+X work as their Ctrl twins too (editor only); Cmd+V stays
+  the terminal's paste.
+- `Ω`/`¸` are typed as usual unless the previous editor key was undo/redo and something is left to
+  redo. "Nothing to undo" / "Nothing to redo" show in the status bar.
+- Undo restores the text, cursor and selection from before the edit; edits that change nothing make no
+  undo step.
 
 ## Keys (shortcut helper)
 | Key | Does |
@@ -195,7 +218,7 @@ used where the real key works shows "Tip: key" at its top for 3 s.
 ## Keys (code smarts)
 | Key | Does |
 |---|---|
-| Ctrl+/ (also arrives as Ctrl+7, Ctrl+_) | comment / uncomment the line or selected lines (`//`, `#` or `--` for Lua/SQL; JSON, Markdown, HTML, CSS have none) |
+| Ctrl+/ (also arrives as Ctrl+7, Ctrl+_) | comment / uncomment the line or selected lines (`//`, `#` or `--` for Lua/SQL; XML, DTD, HTML, Markdown wrap each line in `<!-- -->`, CSS in `/* */`; JSON has none) |
 | Ctrl+Space | completion; also opens by itself after `.` (and `::` in Rust). ↑↓ PgUp PgDn, **Enter** inserts, **Tab** replaces the rest of the word, Esc close, typing filters (fuzzy). Functions come with `()` (cursor inside) or the server's snippet: its placeholders are selected one by one, **Tab / Shift+Tab** next / previous, the last Tab lands after it, Esc ends |
 | (typing `(` or `,`) | signature help above the line, current parameter in bold accent; follows typing, closes off the line or with Esc |
 | Ctrl+B | go to definition (opens or switches the tab; several → a list) · **Ctrl+Alt+←** back |
@@ -325,6 +348,14 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 - tmux drops a trailing `;` of `send-keys -l` (see above): in manual LSP checks type `\;`.
 - rust-analyzer needs ~1–2 min to index this crate on the Mac before diagnostics/definitions come; cargo-check
   diagnostics come after a save (didSave).
+- Cmd+Z doesn't reach terminal programs by default on macOS: Ghostty 1.3 binds `super+z=undo` itself
+  (`ghostty +list-keybinds --default`), iTerm2/Terminal.app use it in their menus. crossterm only sees
+  Cmd (`KeyModifiers::SUPER`) through the kitty protocol. Option+Z types `Ω` without "Option as Meta".
+- XML highlighting: `tree-sitter-xml`'s query tags attribute names `@property`, quotes as delimiters and
+  CDATA brackets `@markup.heading`; `syntax::XML_EXTRA` (prepended, first pattern wins) recolours them.
+  CDATA outside the root element is a parse error (no colours there).
+- e2e colour checks: `tmux capture-pane -e` repeats an SGR only when it changes, so a token can inherit
+  its colour from the gutter before it; `scenarios/xml.sh` `colour_before` replays the codes per char.
 - Ctrl+Alt+L / Alt+Enter / Alt+F7 / Alt+N / Alt+6 / Ctrl+Alt+B need "Option as Meta" on macOS terminals for the Alt part. Ctrl+Alt+Shift+N arrives as Ctrl+Alt+N without the kitty protocol (both open the symbol search).
 - Agents panel: `claude -p` can't ask for permissions, so in the default mode edits are refused (red `⏺` line +
   "N denied"); use Alt+M → acceptEdits for edits. `manual` reports itself as `default` in the init line.
@@ -338,6 +369,7 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
   bracketed paste (Cmd+V / Ctrl+Shift+V), Ctrl+V pastes the editor's own clipboard.
 
 ## Decisions
+`docs/decisions/0010-mac-undo-and-xml.md` – Cmd+Z/Cmd chords via SUPER (editor only), Ω-after-undo redo, Alt+Shift+Z, "Nothing to undo", no-op edits make no undo step, XML/DTD highlighting (tree-sitter-xml), per-line `<!-- -->` comments, lemminx entry.
 `docs/decisions/0009-quick-search.md` – Search Everywhere: Ctrl+T (+ Alt+S/Alt+Space, Mac NBSP), FILES + TEXT sections, tabs, folder scope from the tree, tree follow with snapshot/Esc restore, speed search.
 `docs/decisions/0008-shortcut-helper.md` – key-hints: glass panel bottom right, 20 contexts, fallbacks by kitty, Alt+/ + `settings.toml`, Key Promoter tips, `table.rs` as the single source with a binding test.
 `docs/decisions/0001-stack-and-keymap.md` – Rust + ratatui, IDEA keys by default, Vim optional, internal tool.
@@ -356,6 +388,16 @@ search in the tree (fuzzy on names, closed files via the index). Shortcut helper
 in `src/project/quick.rs` + `tree.rs` and binding tests for the 2 new contexts (235 unit), e2e
 `scenarios/quick_search.sh` (8 scenarios, 50 in all). Not done: double Shift (kitty), ranking content hits,
 opening a hidden tree to follow.
+Mac undo/redo + XML done 2026-10-26 (decision 0010, see Keys (undo/redo)): Cmd+Z / Cmd+Shift+Z (and Cmd+S/A/C/X)
+when the terminal passes Cmd on, redo with Option+Z (`Ω`) right after an undo in Terminal.app/iTerm2, Alt+Shift+Z,
+"Nothing to undo/redo" messages, undo/redo row in the editor hints. Bug fixed: edits that changed nothing
+(Shift+Tab on an unindented line, Ctrl+Backspace at the start, empty paste, Ctrl+Y on an empty file) left an
+empty undo step, so Ctrl+Z seemed dead, and marked the file changed. XML + DTD highlighting (pom.xml, .csproj,
+.plist, .svg, .xsd, .xslt, .xaml, .iml, feeds …), Ctrl+/ wraps lines in `<!-- -->` (also HTML, Markdown; CSS
+`/* */`), `lemminx` in `languages.toml` (not installed). Tests: unit (`src/mackeys.rs`, doc undo, XML detection
+/ spans, comment wrapping), e2e `redo_option_omega`, `kitty_cmd_z_undo_redo`, `scenarios/xml.sh` (colours
+from the tmux screen, comment toggle). Not done yet: Cmd+Z checked by bytes only (not pressed in Ghostty/kitty
+themselves), `--` inside a commented XML line isn't escaped, no block comment key (Ctrl+Shift+/), LemMinX untried.
 Shortcut helper done 2026-10-25 (key-hints, decision 0008, see Keys (shortcut helper)): see-through panel bottom
 right in the editor area, 20 contexts, kitty/legacy key choice, moves to the top right off the cursor line, Alt+/
 toggle saved in `settings.toml` (new `src/config.rs`), `--no-hints`, Key Promoter tips. Tests: 32 unit tests in

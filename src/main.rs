@@ -10,6 +10,7 @@ mod git;
 mod hints;
 mod project;
 mod lsp;
+mod mackeys;
 mod syntax;
 mod term;
 mod ui;

@@ -7,7 +7,8 @@
 //! - a chord: `Ctrl+Shift+N`, `Alt+F12`, `Ctrl+Alt+↑`, `Shift+Tab`; key names `↑ ↓ ← → PgUp PgDn
 //!   Home End Enter Esc Tab Space Del Backspace F1..F12`, or one character;
 //! - alternatives split by `/`: `Alt+←/→`, `Ctrl+C/X`, `F7/Shift+F7` (a bare second key takes the
-//!   first one's modifiers; `Ctrl+/` is the slash key itself);
+//!   first one's modifiers; `Ctrl+/` is the slash key itself); `Ctrl+(Shift+)Z` = with and
+//!   without Shift;
 //! - anything else is typed key by key: Vim's `dd`, `ciw`, `:w` (the test ends a `:` command with
 //!   Enter), `a-z` for "type to filter".
 
@@ -104,6 +105,10 @@ const FIND_IN_FILES: Hint = fb("Ctrl+Shift+F", "Alt+F", "find in files");
 const QUICK: Hint = h("Ctrl+T", "search everywhere");
 const COMMIT: Hint = fb("Ctrl+Enter", "Alt+Enter", "commit ticked");
 const LEAVE_VIM: Hint = h("Ctrl+Alt+V", "IDEA keys (leave Vim)");
+/// Without the kitty protocol Ctrl+Shift+Z arrives as Ctrl+Z; Alt+Z needs "Option as Meta" on a
+/// Mac, where Option+Z (Ω) right after an undo also redoes (decision 0010). Cmd+Z / Cmd+Shift+Z
+/// work too where the terminal passes them on.
+const UNDO_REDO: Hint = fb("Ctrl+(Shift+)Z", "Ctrl+Z/Alt+Z", "undo / redo");
 
 /// The panel title for a context (some add a detail, see `super::title`).
 pub fn title(c: Ctx) -> &'static str {
@@ -144,7 +149,7 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
             h("Ctrl+F/G", "find / go to line"),
             h("Ctrl+B", "go to definition"),
             h("Alt+1/F12", "project / terminal"),
-            h("Alt+←/→", "previous / next tab"),
+            UNDO_REDO,
         ] },
         Ctx::Selection => const { &[
             h("Ctrl+D", "duplicate"),

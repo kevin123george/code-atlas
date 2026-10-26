@@ -71,6 +71,9 @@ pub struct App {
     pub dock: crate::dock::Dock,
     /// Shortcut helper, bottom right (`src/hints/`).
     pub hints: crate::hints::Hints,
+    /// The last editor key was undo or redo: a macOS Option+Z character (`Ω`) now redoes
+    /// (see `mackeys::option_redo`).
+    undo_chain: bool,
 }
 
 impl App {
@@ -107,6 +110,7 @@ impl App {
             vim: None,
             lsp: Default::default(),
             hints: crate::hints::Hints::load(),
+            undo_chain: false,
         })
     }
 
@@ -148,6 +152,7 @@ impl App {
                     return; // Alt+/ toggled the shortcut helper
                 }
                 let armed = self.armed.take();
+                let chain = std::mem::take(&mut self.undo_chain);
                 let before = self.active;
                 if self.dock_key(k) {
                     // Handled by the dock (terminal, commit panel, diff view).
@@ -163,7 +168,13 @@ impl App {
                     self.after_ide(before);
                 } else {
                     self.message = None;
-                    if !self.smart_key(k) {
+                    let k = crate::mackeys::command_as_ctrl(k);
+                    if chain && crate::mackeys::option_redo(&k) && self.doc().can_redo() {
+                        // Option+Z without "Option as Meta" (Terminal.app, iTerm2 defaults) types Ω.
+                        self.doc_mut().redo();
+                        self.undo_chain = true;
+                        self.after_ide(before);
+                    } else if !self.smart_key(k) {
                         self.key(k, armed);
                         self.smart_after_key(k);
                     }
@@ -171,6 +182,7 @@ impl App {
                 self.follow = true;
             }
             Event::Paste(text) => {
+                self.undo_chain = false;
                 if self.dock_paste(&text) || self.agents_paste(&text) {
                     return;
                 }
@@ -188,6 +200,7 @@ impl App {
                 }
             }
             Event::Mouse(m) => {
+                self.undo_chain = false;
                 let before = self.active;
                 let hints_before = self.hints_before();
                 if !self.dock_mouse(m) && !self.agents_mouse(m) && !self.project_mouse(m) {
@@ -360,14 +373,19 @@ impl App {
             KeyCode::Char('g') if ctrl => self.prompt = Some(Prompt { kind: PromptKind::GotoLine, input: String::new() }),
 
             // History and clipboard
-            KeyCode::Char('z') | KeyCode::Char('Z') if ctrl && shift => {
-                d.redo();
-            }
-            KeyCode::Char('z') if alt => {
-                d.redo();
+            // Redo: Ctrl+Shift+Z (kitty protocol; elsewhere it arrives as Ctrl+Z), Alt+Z and
+            // Alt+Shift+Z (Option as Meta), or Ω right after an undo (`mackeys`).
+            KeyCode::Char('z') | KeyCode::Char('Z') if (ctrl && shift) || (alt && !ctrl) => {
+                if !d.redo() {
+                    self.message = Some("Nothing to redo".into());
+                }
+                self.undo_chain = true;
             }
             KeyCode::Char('z') if ctrl => {
-                d.undo();
+                if !d.undo() {
+                    self.message = Some("Nothing to undo".into());
+                }
+                self.undo_chain = true;
             }
             KeyCode::Char('c') if ctrl => {
                 self.clip = d.copy();
@@ -382,10 +400,15 @@ impl App {
             KeyCode::Char('d') if ctrl => d.duplicate(),
             KeyCode::Char('y') if ctrl => d.delete_lines(),
             // Ctrl+/ arrives as Ctrl+/ (kitty), Ctrl+7 or Ctrl+_ depending on the terminal.
-            KeyCode::Char('/') | KeyCode::Char('7') | KeyCode::Char('_') if ctrl => match d.syntax.lang.line_comment() {
-                Some(token) => crate::syntax::comment::toggle(d, token),
-                None => self.message = Some(format!("{} has no line comments", d.syntax.lang.name())),
-            },
+            // Languages with only block comments (XML, HTML, CSS) get each line wrapped.
+            KeyCode::Char('/') | KeyCode::Char('7') | KeyCode::Char('_') if ctrl => {
+                let lang = d.syntax.lang;
+                match (lang.line_comment(), lang.block_comment()) {
+                    (Some(token), _) => crate::syntax::comment::toggle(d, token),
+                    (None, Some((open, close))) => crate::syntax::comment::toggle_wrap(d, open, close),
+                    (None, None) => self.message = Some(format!("{} has no comments", lang.name())),
+                }
+            }
 
             // Movement (Shift selects)
             KeyCode::Up if alt && shift => d.move_lines(false),

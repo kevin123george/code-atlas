@@ -111,6 +111,21 @@ servers = ["docker-langserver"]
 extensions = ["sql"]
 servers = []
 
+# XML and its many dialects (Maven, MSBuild/.NET, Android, Apple plists, SVG, XSLT, feeds,
+# IntelliJ modules). LemMinX (Eclipse, the server inside VS Code's XML extension): not on Homebrew;
+# see AGENTS.md for installing its native binary or uber jar.
+[language.xml]
+extensions = [
+    "xml", "xsd", "xsl", "xslt", "svg", "plist", "pom", "wsdl", "xliff", "xlf", "rss", "atom", "xaml",
+    "csproj", "fsproj", "vbproj", "vcxproj", "proj", "props", "targets", "nuspec", "resx",
+    "iml", "fxml", "xib", "storyboard", "kml", "gpx", "*.xml.dist",
+]
+servers = ["lemminx"]
+
+[language.dtd]
+extensions = ["dtd", "ent"]
+servers = ["lemminx"]
+
 # ---- servers ------------------------------------------------------------------------------------
 
 [language-server.rust-analyzer]
@@ -212,4 +227,9 @@ version-args = []
 [language-server.docker-langserver]
 command = "docker-langserver"
 args = ["--stdio"]
+version-args = []
+
+# LemMinX speaks LSP on stdin/stdout without arguments (native binary or a `java -jar` wrapper).
+[language-server.lemminx]
+command = "lemminx"
 version-args = []

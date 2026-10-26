@@ -43,6 +43,7 @@ tree-sitter-typescript = "0.23.2"
 tree-sitter-yaml = "0.7.2"
 unicode-width = "0.2"
 vt100 = "0.15"
+tree-sitter-xml = "0.7.0"
 
 [profile.release]
 lto = true

@@ -46,6 +46,7 @@ fn labels_parse_into_the_keys_crossterm_reports() {
     assert_eq!(one("Ctrl+Alt+↑"), vec![vec![(KeyCode::Up, M::CONTROL | M::ALT)]]);
     assert_eq!(one("Shift+PgUp/PgDn")[1], vec![(KeyCode::PageDown, M::SHIFT)]);
     assert_eq!(one("Space"), vec![vec![(KeyCode::Char(' '), M::NONE)]]);
+    assert_eq!(one("Ctrl+(Shift+)Z"), vec![vec![(KeyCode::Char('z'), M::CONTROL)], vec![(KeyCode::Char('Z'), M::CONTROL | M::SHIFT)]]);
     assert!(matches("Ctrl+F/G", &k(KeyCode::Char('g'), M::CONTROL)));
     assert!(!matches("Ctrl+F/G", &k(KeyCode::Char('g'), M::ALT)));
 }
@@ -291,6 +292,7 @@ fn setups(ctx: Ctx) -> Vec<Setup> {
     match ctx {
         Ctx::Idea => vec![
             |_| {},
+            |app| keys(app, "x"),
             |app| {
                 keys(app, "x");
                 keys(app, "Ctrl+Z");

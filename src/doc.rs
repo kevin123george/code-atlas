@@ -443,31 +443,33 @@ impl Doc {
         self.last_edit = EditKind::None;
     }
 
+    /// Steps back one edit. Steps that changed no text (an edit with nothing to do) are
+    /// skipped, so one press always shows a change. Returns false when there was nothing to undo.
     pub fn undo(&mut self) -> bool {
-        if self.group.is_some() {
-            self.group = Some(false);
-        }
-        match self.undo.pop() {
-            Some(s) => {
-                let cur = self.restore(s);
-                self.redo.push(cur);
-                true
-            }
-            None => false,
-        }
+        self.step(false)
     }
 
     pub fn redo(&mut self) -> bool {
+        self.step(true)
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.redo.iter().any(|s| s.rope != self.rope)
+    }
+
+    fn step(&mut self, forward: bool) -> bool {
         if self.group.is_some() {
             self.group = Some(false);
         }
-        match self.redo.pop() {
-            Some(s) => {
-                let cur = self.restore(s);
-                self.undo.push(cur);
-                true
+        loop {
+            let popped = if forward { self.redo.pop() } else { self.undo.pop() };
+            let Some(s) = popped else { return false };
+            if s.rope == self.rope {
+                continue;
             }
-            None => false,
+            let cur = self.restore(s);
+            if forward { self.undo.push(cur) } else { self.redo.push(cur) }
+            return true;
         }
     }
 
@@ -504,6 +506,9 @@ impl Doc {
     }
 
     pub fn insert_str(&mut self, text: &str) {
+        if text.is_empty() && self.selection().is_none() {
+            return;
+        }
         self.begin(EditKind::Other);
         self.delete_selection();
         let text = normalize_eol(text, self.eol());
@@ -602,6 +607,10 @@ impl Doc {
             self.word_left(false);
             self.anchor = Some(end);
         }
+        if self.selection().is_none() {
+            self.anchor = None;
+            return;
+        }
         self.begin(EditKind::Other);
         self.delete_selection();
     }
@@ -611,6 +620,10 @@ impl Doc {
             let start = self.cursor;
             self.word_right(false);
             self.anchor = Some(start);
+        }
+        if self.selection().is_none() {
+            self.anchor = None;
+            return;
         }
         self.begin(EditKind::Other);
         self.delete_selection();
@@ -686,6 +699,16 @@ impl Doc {
     }
 
     fn indent_lines(&mut self, a: usize, b: usize, add: bool) {
+        let changes = |l: usize| {
+            if add {
+                self.line_len(l) > 0
+            } else {
+                matches!(self.rope.line(l).get_char(0), Some(' ' | '\t'))
+            }
+        };
+        if !(a..=b).any(changes) {
+            return; // nothing to indent or outdent: no undo step, file stays unchanged
+        }
         self.begin(EditKind::Other);
         let (mut cur, mut anc) = (self.cursor, self.anchor);
         for line in a..=b {
@@ -739,6 +762,9 @@ impl Doc {
 
     /// Ctrl+Y: deletes the current line(s).
     pub fn delete_lines(&mut self) {
+        if self.rope.len_chars() == 0 {
+            return;
+        }
         let (a, b) = self.line_span();
         self.begin(EditKind::Other);
         let col = self.display_col(self.line(), self.col());
@@ -947,6 +973,80 @@ mod tests {
         assert!(!d.dirty());
         d.redo();
         assert_eq!(text(&d), "hello");
+    }
+
+    #[test]
+    fn undo_skips_edits_that_changed_nothing() {
+        // Shift+Tab on an unindented line, Ctrl+Backspace at the start, an empty paste and Ctrl+Y
+        // on an empty file used to leave an empty undo step: the next Ctrl+Z seemed to do nothing.
+        let mut d = doc("", 0);
+        for c in "ab".chars() {
+            d.type_char(c);
+        }
+        d.untab();
+        d.move_to(0, false);
+        d.delete_word_left();
+        d.paste(&Clip::default());
+        assert!(d.undo(), "one press undoes the typing");
+        assert_eq!(text(&d), "");
+        assert!(!d.dirty());
+        assert!(!d.undo(), "nothing left");
+        let mut e = doc("", 0);
+        e.delete_lines();
+        e.untab();
+        assert!(!e.dirty(), "no-op edits don't mark the file changed");
+        assert!(!e.undo());
+        // A no-op step that slipped in anyway (an empty LSP edit) is skipped too.
+        let mut f = doc("x", 1);
+        f.type_char('y');
+        f.edit_with(|_, _, _| {});
+        assert!(f.undo());
+        assert_eq!(text(&f), "x");
+        assert!(f.redo());
+        assert_eq!(text(&f), "xy");
+    }
+
+    #[test]
+    fn undo_and_redo_restore_text_and_cursor_over_many_steps() {
+        // Undo puts the cursor (and selection) back where it was before the edit, step by step
+        // over typing, line ops, paste and wrapping.
+        type Edit = fn(&mut Doc);
+        let edits: [(Edit, Edit); 7] = [
+            (|d| d.end(false), |d| "x1".chars().for_each(|c| d.type_char(c))),
+            (|_| {}, |d| d.duplicate()),
+            (|_| {}, |d| d.move_lines(true)),
+            (|_| {}, |d| d.paste(&Clip { text: "p\nq".into(), whole_line: false })),
+            (|_| {}, |d| d.delete_lines()),
+            (|d| d.select(0, 3), |d| d.type_char('(')),
+            (|d| d.move_to(2, false), |d| d.newline()),
+        ];
+        let mut d = doc("one\ntwo\n", 0);
+        let state = |d: &Doc| (text(d), d.cursor, d.selection());
+        let (mut before, mut after) = (Vec::new(), Vec::new());
+        for (prepare, edit) in edits {
+            prepare(&mut d);
+            before.push(state(&d));
+            edit(&mut d);
+            after.push(state(&d));
+        }
+        for i in (0..edits.len()).rev() {
+            assert!(d.undo(), "undo step {i}");
+            assert_eq!(state(&d), before[i], "after undoing step {i}");
+        }
+        assert!(!d.undo());
+        assert!(!d.dirty());
+        // Redo brings back the text after the step, with the cursor where it was when the next
+        // step began (that is what undo saw); after the last step that is where editing ended.
+        for i in 0..edits.len() {
+            assert!(d.redo(), "redo step {i}");
+            let want = before.get(i + 1).map_or(&after[i], |b| b);
+            assert_eq!(text(&d), after[i].0, "text after redoing step {i}");
+            assert_eq!((d.cursor, d.selection()), (want.1, want.2), "cursor after redoing step {i}");
+        }
+        assert!(!d.redo());
+        assert!(d.undo() && d.can_redo());
+        d.type_char('z');
+        assert!(!d.can_redo(), "a new edit drops the redo steps");
     }
 
     #[test]

@@ -234,6 +234,12 @@ fn split_mods(s: &str) -> Option<(KeyModifiers, &str)> {
 /// A table label → its alternatives, each a sequence of key presses. `None` = a label the
 /// syntax doesn't cover (the table test fails on it).
 pub fn parse(label: &str) -> Option<Vec<Vec<KeyEvent>>> {
+    // "Ctrl+(Shift+)Z" = Ctrl+Z and Ctrl+Shift+Z.
+    if let Some((a, b)) = label.split_once("(Shift+)") {
+        let mut out = parse(&format!("{a}{b}"))?;
+        out.extend(parse(&format!("{a}Shift+{b}"))?);
+        return Some(out);
+    }
     // Split on '/' between keys: not the '/' key itself ("Ctrl+/", a lone "/").
     let chars: Vec<char> = label.chars().collect();
     let mut parts = Vec::new();

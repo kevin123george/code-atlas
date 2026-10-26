@@ -36,15 +36,17 @@ pub enum Lang {
     Markdown,
     Dockerfile,
     Sql,
+    Xml,
+    Dtd,
     Plain,
 }
 
 impl Lang {
     /// Every language with a grammar (all but `Plain`).
-    pub const ALL: [Lang; 20] = [
+    pub const ALL: [Lang; 22] = [
         Lang::Rust, Lang::TypeScript, Lang::Tsx, Lang::JavaScript, Lang::Java, Lang::Kotlin, Lang::Python, Lang::Go,
         Lang::C, Lang::Cpp, Lang::Bash, Lang::Lua, Lang::Json, Lang::Yaml, Lang::Toml, Lang::Html, Lang::Css,
-        Lang::Markdown, Lang::Dockerfile, Lang::Sql,
+        Lang::Markdown, Lang::Dockerfile, Lang::Sql, Lang::Xml, Lang::Dtd,
     ];
 
     /// The name in `languages.toml` (`[language.<key>]`).
@@ -70,6 +72,8 @@ impl Lang {
             Lang::Markdown => "markdown",
             Lang::Dockerfile => "dockerfile",
             Lang::Sql => "sql",
+            Lang::Xml => "xml",
+            Lang::Dtd => "dtd",
             Lang::Plain => "text",
         }
     }
@@ -123,6 +127,8 @@ impl Lang {
             Lang::Markdown => "Markdown",
             Lang::Dockerfile => "Dockerfile",
             Lang::Sql => "SQL",
+            Lang::Xml => "XML",
+            Lang::Dtd => "DTD",
             Lang::Plain => "Text",
         }
     }
@@ -133,7 +139,17 @@ impl Lang {
             Lang::Rust | Lang::TypeScript | Lang::Tsx | Lang::JavaScript | Lang::Java | Lang::Kotlin | Lang::Go | Lang::C | Lang::Cpp => Some("//"),
             Lang::Python | Lang::Toml | Lang::Bash | Lang::Yaml | Lang::Dockerfile => Some("#"),
             Lang::Lua | Lang::Sql => Some("--"),
-            Lang::Json | Lang::Markdown | Lang::Html | Lang::Css | Lang::Plain => None,
+            Lang::Json | Lang::Markdown | Lang::Html | Lang::Css | Lang::Xml | Lang::Dtd | Lang::Plain => None,
+        }
+    }
+
+    /// Start and end of a block comment, for languages without line comments: Ctrl+/ wraps each
+    /// line in them (`<!-- line -->`), as IntelliJ does for XML.
+    pub fn block_comment(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Lang::Xml | Lang::Dtd | Lang::Html | Lang::Markdown => Some(("<!--", "-->")),
+            Lang::Css => Some(("/*", "*/")),
+            _ => None,
         }
     }
 
@@ -166,6 +182,9 @@ impl Lang {
             Lang::Markdown => "markdown",
             Lang::Dockerfile => "dockerfile",
             Lang::Sql => "sql",
+            Lang::Xml if ext == "xsl" || ext == "xslt" => "xsl",
+            Lang::Xml => "xml",
+            Lang::Dtd => "dtd",
             Lang::Plain => "plaintext",
         }
     }
@@ -215,6 +234,8 @@ impl Lang {
                     Lang::Markdown => (tree_sitter_md::LANGUAGE.into(), vec![tree_sitter_md::HIGHLIGHT_QUERY_BLOCK]),
                     Lang::Dockerfile => (tree_sitter_containerfile::LANGUAGE.into(), vec![tree_sitter_containerfile::HIGHLIGHTS_QUERY]),
                     Lang::Sql => (tree_sitter_sequel::LANGUAGE.into(), vec![tree_sitter_sequel::HIGHLIGHTS_QUERY]),
+                    Lang::Xml => (tree_sitter_xml::LANGUAGE_XML.into(), vec![XML_EXTRA, tree_sitter_xml::XML_HIGHLIGHT_QUERY]),
+                    Lang::Dtd => (tree_sitter_xml::LANGUAGE_DTD.into(), vec![tree_sitter_xml::DTD_HIGHLIGHT_QUERY]),
                     Lang::Plain => return None,
                 };
                 Config::new(lang, &queries)
@@ -222,6 +243,16 @@ impl Lang {
             .as_ref()
     }
 }
+
+/// Put before the XML grammar's own query (the first pattern wins for a node): attribute names
+/// coloured like HTML's (the bundled query makes them plain `@property`), quotes in the string
+/// colour like the other languages' strings, and the CDATA brackets as punctuation, not headings.
+const XML_EXTRA: &str = r#"
+(Attribute (Name) @attribute)
+["\"" "'"] @string
+(CDSect (CDStart) @punctuation.delimiter)
+(CDSect "]]>" @punctuation.delimiter)
+"#;
 
 /// What a piece of code is, as far as colouring goes. `ui::theme::token_style` gives the colour.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -569,6 +600,53 @@ mod tests {
         for l in Lang::ALL {
             assert_eq!(Lang::from_key(l.key()), Some(l));
         }
+    }
+
+    #[test]
+    fn detects_xml_and_its_dialects() {
+        for name in [
+            "pom.xml", "a.XML", "schema.xsd", "t.xsl", "t.xslt", "icon.svg", "Info.plist", "lib-1.0.pom",
+            "App.csproj", "x.fsproj", "Directory.Build.props", "x.targets", "MainWindow.xaml", "code-atlas.iml",
+            "feed.rss", "feed.atom", "Main.storyboard", "phpunit.xml.dist",
+        ] {
+            assert_eq!(lang(name), Lang::Xml, "{name}");
+        }
+        assert_eq!(lang("x.dtd"), Lang::Dtd);
+        assert_eq!(lang("go.mod"), Lang::Plain, "not taken by DTD");
+        assert_eq!(Lang::Xml.name(), "XML");
+        assert_eq!(Lang::Xml.line_comment(), None);
+        assert_eq!(Lang::Xml.block_comment(), Some(("<!--", "-->")));
+        assert_eq!(Lang::Html.block_comment(), Some(("<!--", "-->")));
+        assert_eq!(Lang::Css.block_comment(), Some(("/*", "*/")));
+        assert_eq!(Lang::Rust.block_comment(), None);
+        assert_eq!(Lang::Xml.lsp_id(Some(Path::new("t.xslt"))), "xsl");
+        assert_eq!(Lang::Xml.lsp_id(Some(Path::new("pom.xml"))), "xml");
+    }
+
+    #[test]
+    fn highlights_xml() {
+        let text = "<?xml version=\"1.0\"?>\n<!-- note -->\n<project a=\"1\">&amp;<b/>text\n<![CDATA[raw]]></project>\n";
+        let t = tokens_of(Lang::Xml, text);
+        assert_eq!(t[0][2], Some(Token::Keyword), "xml");
+        assert_eq!(t[0][6], Some(Token::Property), "version");
+        assert_eq!(t[0][15], Some(Token::Number), "1.0");
+        assert_eq!(t[1][0], Some(Token::Comment));
+        assert_eq!(t[1][12], Some(Token::Comment));
+        assert_eq!(t[2][0], Some(Token::Punctuation), "<");
+        assert_eq!(t[2][1], Some(Token::Tag), "project");
+        assert_eq!(t[2][9], Some(Token::Attribute), "a, coloured like HTML attributes");
+        assert_eq!(t[2][11], Some(Token::String), "the quote");
+        assert_eq!(t[2][12], Some(Token::String), "1");
+        assert_eq!(t[2][15], Some(Token::Constant), "&amp;");
+        assert_eq!(t[2][21], Some(Token::Tag), "b");
+        assert_eq!(t[2][24], None, "text stays plain");
+        assert_eq!(t[3][0], Some(Token::Punctuation), "<![CDATA[");
+        assert_eq!(t[3][9], Some(Token::String), "raw");
+        assert_eq!(t[3][12], Some(Token::Punctuation), "]]>");
+        assert_eq!(t[3][17], Some(Token::Tag), "closing project");
+        let d = tokens_of(Lang::Dtd, "<!ELEMENT note (to)>\n");
+        assert_eq!(d[0][2], Some(Token::Keyword), "ELEMENT");
+        assert_eq!(d[0][10], Some(Token::Tag), "note");
     }
 
     #[test]
