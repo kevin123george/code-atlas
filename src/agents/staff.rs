@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub const REFRESH: Duration = Duration::from_secs(60);
-const LAPTOP: &str = "astra@astra";
+const LAPTOP: &str = "astra@astra"; // Tailscale MagicDNS name of the GPU laptop
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Member {

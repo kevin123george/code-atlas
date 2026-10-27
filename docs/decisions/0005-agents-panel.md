@@ -37,7 +37,7 @@ so these are the choices made. Checked against Claude Code 2.1.310 (`claude --he
   tests): every run with prompt(s), session id, state, times, cost and transcript (up to 2 000 entries a run,
   100 runs). The panel lists the current project's runs; a run that was running at exit comes back "stopped"
   and can be resumed.
-- **Staff:** `aa-staff.sh status` over `ssh -o ConnectTimeout=5 -o BatchMode=yes astra@astra` (BatchMode:
+- **Staff:** `aa-staff.sh status` over `ssh -o ConnectTimeout=5 -o BatchMode=yes astra@astra` (Tailscale MagicDNS name) (BatchMode:
   never a password prompt over the editor), every 60 s while the panel is open, on a thread. It is run locally
   only on the laptop itself (hostname `astra`): the Mac has `~/atelier-astra` too (a link to the repo) but no
   staff sessions. The script prints every old stopped session again, so we show one row per name (the live one,
