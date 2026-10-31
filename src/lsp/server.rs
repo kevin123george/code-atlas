@@ -217,6 +217,11 @@ impl Server {
         self.send(&jsonrpc::notification("exit", Value::Null));
     }
 
+    /// The server's process id (the Control Center's memory / CPU view).
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     pub fn kill(&mut self) {
         if matches!(self.child.try_wait(), Ok(None)) {
             let _ = self.child.kill();

@@ -21,6 +21,7 @@ pub mod jsonrpc;
 pub mod popup;
 pub mod server;
 pub mod snippet;
+pub mod status;
 pub mod text;
 pub mod words;
 

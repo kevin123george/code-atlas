@@ -88,6 +88,16 @@ pub fn context(app: &App) -> Ctx {
     use crate::lsp::popup::Popup;
     use crate::project::PopupKind;
     use crate::vim::Mode;
+    // Find Action and the Control Center sit over everything (src/palette/, src/control/).
+    if app.palette.open {
+        return Ctx::Palette;
+    }
+    if app.control.open {
+        return match app.control.page {
+            crate::control::Page::Overview => Ctx::ControlCenter,
+            crate::control::Page::Settings => Ctx::ControlSettings,
+        };
+    }
     let dock = &app.dock;
     if dock.git.diff.is_some() {
         return Ctx::Diff;

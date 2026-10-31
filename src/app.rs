@@ -78,6 +78,10 @@ pub struct App {
     /// The last editor key was undo or redo: a macOS Option+Z character (`Ω`) now redoes
     /// (see `mackeys::option_redo`).
     undo_chain: bool,
+    /// Control Center (Alt+O): tiles, settings, themes (`src/control/`).
+    pub control: crate::control::Control,
+    /// Find Action (Ctrl+Shift+A / Ctrl+O): every action, searchable (`src/palette/`).
+    pub palette: crate::palette::Palette,
 }
 
 impl App {
@@ -123,6 +127,8 @@ impl App {
             git_view: crate::git::view::GitView::default(),
             workspace: crate::workspace::repos::WsState::default(),
             undo_chain: false,
+            control: crate::control::Control::new(settings),
+            palette: crate::palette::Palette::load(),
         };
         app.workspace_init();
         Ok(app)
@@ -168,7 +174,10 @@ impl App {
                 let armed = self.armed.take();
                 let chain = std::mem::take(&mut self.undo_chain);
                 let before = self.active;
-                if self.dock_key(k) {
+                if self.control_key(k) {
+                    // Find Action, the Control Center, or one of their keys (src/control/).
+                    self.after_ide(before);
+                } else if self.dock_key(k) {
                     // Handled by the dock (terminal, commit panel, diff view).
                     self.after_ide(before);
                 } else if self.prompt.is_some() {
@@ -203,7 +212,7 @@ impl App {
             }
             Event::Paste(text) => {
                 self.undo_chain = false;
-                if self.workspace_paste(&text) || self.dock_paste(&text) || self.agents_paste(&text) || self.git_view_paste(&text) {
+                if self.control_paste(&text) || self.workspace_paste(&text) || self.dock_paste(&text) || self.agents_paste(&text) || self.git_view_paste(&text) {
                     return;
                 }
                 if self.vim.as_mut().is_some_and(|v| v.paste(&text)) {
@@ -223,7 +232,7 @@ impl App {
                 self.undo_chain = false;
                 let before = self.active;
                 let hints_before = self.hints_before();
-                if !self.workspace_mouse(m) && !self.dock_mouse(m) && !self.git_view_mouse(m) && !self.agents_mouse(m) && !self.project_mouse(m) {
+                if !self.control_mouse(m) && !self.workspace_mouse(m) && !self.dock_mouse(m) && !self.git_view_mouse(m) && !self.agents_mouse(m) && !self.project_mouse(m) {
                     self.mouse(m);
                 }
                 self.after_ide(before);

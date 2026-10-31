@@ -40,6 +40,15 @@ pub mod theme {
 
     /// Colour (and italic for comments) of a highlighted token.
     pub fn token_style(t: crate::syntax::Token) -> ratatui::style::Style {
+        let s = dark_token_style(t);
+        // A theme may colour this capture on its own (control::theme, decision 0016).
+        match crate::control::theme::syntax_fg(t) {
+            Some(c) => s.fg(c),
+            None => s,
+        }
+    }
+
+    fn dark_token_style(t: crate::syntax::Token) -> ratatui::style::Style {
         use crate::syntax::Token::*;
         use ratatui::style::{Modifier, Style};
         let fg = match t {
@@ -89,6 +98,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let lsp_cursor = app.draw_lsp_popups(f.buffer_mut(), cursor, prompt_cursor.is_some(), area);
     let popup_cursor = crate::project::ui::draw_popup(f.buffer_mut(), &mut app.project, area);
     let repos_cursor = crate::workspace::ui::draw_popup(f.buffer_mut(), app, area);
+    // Control Center and Find Action on top of everything (src/control/, src/palette/), then
+    // the theme recolours the whole frame.
+    let control = crate::control::ui::draw(f.buffer_mut(), app, area);
+    crate::control::theme::apply(f.buffer_mut(), area, app.control.settings.theme);
+    if let Some(c) = control {
+        if let Some(p) = c {
+            f.set_cursor_position(p);
+        }
+        return;
+    }
 
     if let Some(p) = repos_cursor.or(popup_cursor).or(lsp_cursor).or(prompt_cursor).or(dock_cursor).or(view_cursor).or(panel_cursor).or(cursor) {
         f.set_cursor_position(p);
@@ -98,6 +117,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 /// Block cursor in Vim normal / visual mode, a bar everywhere else (typing, prompts).
 pub fn block_cursor(app: &App) -> bool {
     app.prompt.is_none()
+        && !app.control.open
+        && !app.palette.open
         && app.project.popup.is_none()
         && app.workspace.popup.is_none()
         && !app.project.focus_tree

@@ -282,8 +282,10 @@ fn fingerprint(app: &App) -> String {
         ws.current,
         ws.popup.as_ref().map(|p| (p.mode, p.sel, p.filter.clone(), p.input.clone(), p.only_changed, p.wsel, p.plan.as_ref().map(|x| x.question.clone())))
     );
+    let cc = &app.control;
+    let control = format!("{} {:?} {} {:?} {} {} {:?} | palette {} {:?} {}", cc.open, cc.page, cc.tile, cc.rows, cc.setting, cc.settings.theme.key(), (cc.settings.hints, cc.settings.vim, cc.settings.autocomplete), app.palette.open, app.palette.input, app.palette.selected);
     format!(
-        "active {} docs {docs:?}\nprompt {prompt:?} msg {:?} quit {} clip {:?}\nproject {popup:?} {tree:?}\nagents {agents}\ndock {dock} term {term:?}\nvim {vim:?} lsp {lsp} hints {}\ngit view {git_view}\nworkspace {workspace}",
+        "active {} docs {docs:?}\nprompt {prompt:?} msg {:?} quit {} clip {:?}\nproject {popup:?} {tree:?}\nagents {agents}\ndock {dock} term {term:?}\nvim {vim:?} lsp {lsp} hints {}\ngit view {git_view}\nworkspace {workspace}\ncontrol {control}",
         app.active, app.message, app.quit, app.clip.text, app.hints.on
     )
 }
@@ -543,6 +545,34 @@ fn setups(ctx: Ctx) -> Vec<Setup> {
             let rev = app.docs[0].rev();
             wait(app, "blame", |a| a.git_view.blames.get(Some(&path)).is_some_and(|b| b.rev == Some(rev)));
         }],
+        Ctx::ControlCenter => vec![
+            |app| keys(app, "Alt+O"),
+            |app| {
+                keys(app, "Alt+O");
+                app.control.tile = 2; // language servers: r restarts
+            },
+        ],
+        Ctx::ControlSettings => vec![
+            |app| {
+                keys(app, "Alt+O");
+                keys(app, "2");
+            },
+            |app| {
+                keys(app, "Alt+O");
+                keys(app, "2");
+                app.control.setting = 1;
+            },
+        ],
+        Ctx::Palette => vec![
+            |app| {
+                keys(app, "Ctrl+R");
+                app.palette.selected = 1;
+            },
+            |app| {
+                keys(app, "Ctrl+R");
+                keys(app, "dupl");
+            },
+        ],
     }
 }
 
@@ -740,6 +770,9 @@ binding_tests! {
     keys_repos_input => ReposInput,
     keys_repos_confirm => ReposConfirm,
     keys_workspaces => Workspaces,
+    keys_control_center => ControlCenter,
+    keys_control_settings => ControlSettings,
+    keys_palette => Palette,
 }
 
 // ---- context selection and drawing in a real App ---------------------------------------------

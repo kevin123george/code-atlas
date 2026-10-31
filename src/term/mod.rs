@@ -83,6 +83,11 @@ impl Terminal {
         self.parser.screen()
     }
 
+    /// The shell's process id (the Control Center's memory / CPU view).
+    pub fn pid(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
     /// Feeds pending output to the emulator; returns whether anything arrived.
     pub fn poll(&mut self) -> bool {
         let mut got = false;

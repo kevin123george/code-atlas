@@ -4,6 +4,7 @@
 mod agents;
 mod app;
 mod config;
+mod control;
 mod dock;
 mod doc;
 mod git;
@@ -11,6 +12,7 @@ mod hints;
 mod project;
 mod lsp;
 mod mackeys;
+mod palette;
 mod syntax;
 mod term;
 mod ui;
@@ -41,6 +43,7 @@ fn main() -> Result<()> {
         println!("  -w [n|name]  list the recent workspaces, or open one of them");
         println!("  --vim        start in Vim mode (also CATLAS_VIM=1; Ctrl+Alt+V toggles at runtime)");
         println!("  --no-hints   start without the shortcut helper (Alt+/ toggles it and saves the choice)");
+        println!("Keys: Ctrl+Shift+A or Ctrl+O find any action · Alt+O (Option+O) Control Center: agents, servers, settings, themes");
         println!("catlas --health [dir]   which languages have highlighting and which language servers are installed");
         return Ok(());
     }
@@ -83,7 +86,7 @@ fn main() -> Result<()> {
     let no_hints = args.iter().any(|a| a == "--no-hints");
     let files = args.into_iter().filter(|a| a != "--vim" && a != "--no-hints").map(PathBuf::from).collect();
     let mut app = app::App::new(files)?;
-    if vim {
+    if vim || app.control.settings.vim {
         app.set_vim(true);
     }
     if no_hints {
@@ -113,6 +116,7 @@ fn run(app: &mut app::App) -> Result<()> {
         app.tick();
         redraw |= app.agents_tick();
         redraw |= app.dock_tick();
+        redraw |= app.control_tick();
         if redraw || last_draw.elapsed() >= Duration::from_millis(250) {
             term.draw(|f| ui::draw(f, app))?;
             redraw = false;

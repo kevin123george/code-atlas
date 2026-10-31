@@ -82,11 +82,14 @@ pub enum Ctx {
     ReposInput,
     ReposConfirm,
     Workspaces,
+    ControlCenter,
+    ControlSettings,
+    Palette,
 }
 
 /// Every context (tests walk them all).
 #[cfg(test)]
-pub const ALL: [Ctx; 33] = [
+pub const ALL: [Ctx; 36] = [
     Ctx::Idea,
     Ctx::Selection,
     Ctx::VimNormal,
@@ -120,6 +123,9 @@ pub const ALL: [Ctx; 33] = [
     Ctx::ReposInput,
     Ctx::ReposConfirm,
     Ctx::Workspaces,
+    Ctx::ControlCenter,
+    Ctx::ControlSettings,
+    Ctx::Palette,
 ];
 
 const GOTO_FILE: Hint = fb("Ctrl+Shift+N", "Ctrl+P", "go to file");
@@ -139,6 +145,11 @@ const COMPLETE: Hint = h("Ctrl+Space/J", "complete");
 const GIT_VIEW: Hint = h("Ctrl+L", "git review / log");
 /// The Repos popup (decision 0013): Ctrl+O reaches every terminal and nothing else used it.
 const REPOS: Hint = h("Ctrl+O", "repos (workspace)");
+/// Find Action (decision 0016): Ctrl+Shift+A needs the kitty protocol; Ctrl+R reaches every
+/// terminal (Terminal.app included; IDEA's Replace isn't built; Vim normal mode keeps it as redo).
+const FIND_ACTION: Hint = fb("Ctrl+Shift+A", "Ctrl+R", "find any action");
+/// The Control Center: Alt+O (Option+O; macOS without "Option as Meta" types `ø`, also read).
+const CONTROL: Hint = h("Alt+O", "control center");
 
 /// The panel title for a context (some add a detail, see `super::title`).
 pub fn title(c: Ctx) -> &'static str {
@@ -176,6 +187,9 @@ pub fn title(c: Ctx) -> &'static str {
         Ctx::ReposInput => "repos · input",
         Ctx::ReposConfirm => "repos · confirm",
         Ctx::Workspaces => "recent workspaces",
+        Ctx::ControlCenter => "control center",
+        Ctx::ControlSettings => "control center · settings",
+        Ctx::Palette => "find action",
     }
 }
 
@@ -188,8 +202,8 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
             COMPLETE,
             GIT_VIEW,
             h("Ctrl+F/G", "find / go to line"),
-            h("Ctrl+B", "go to definition"),
-            h("Alt+1/F12", "project / terminal"),
+            CONTROL,
+            FIND_ACTION,
             UNDO_REDO,
         ] },
         Ctx::Selection => const { &[
@@ -400,6 +414,33 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
             COMPLETE,
             h("Ctrl+F/G", "find / go to line"),
             UNDO_REDO,
+        ] },
+        Ctx::ControlCenter => const { &[
+            h("Tab/Shift+Tab", "next / prev tile"),
+            h("↑/↓", "rows"),
+            h("Enter", "act on the row"),
+            h("r", "restart / refresh"),
+            h("m", "agents"),
+            h("2", "settings"),
+            FIND_ACTION,
+            h("Esc", "close"),
+        ] },
+        Ctx::ControlSettings => const { &[
+            h("↑/↓", "select"),
+            h("Enter/Space", "change (saved)"),
+            h("←/→", "previous / next choice"),
+            h("e", "open settings.toml"),
+            h("l", "open languages.toml"),
+            h("1", "overview"),
+            h("Esc", "back"),
+        ] },
+        Ctx::Palette => const { &[
+            h("a-z", "search actions"),
+            h("↑/↓", "select"),
+            h("Enter", "run it"),
+            h("Ctrl+U", "clear"),
+            CONTROL,
+            h("Esc", "close"),
         ] },
     }
 }
