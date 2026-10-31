@@ -131,6 +131,7 @@ pub const CODE: &[Action] = &[
 ];
 
 pub const TOOLS: &[Action] = &[
+    alias(k("ws.repos", "Tool windows", "Repos (workspace)", "Ctrl+O", &["Ctrl+O"]), "repositories roots fetch pull all"),
     alias(legacy(keyed(d("palette.open", "Tool windows", "Find Action", |a| a.open_palette()), "Ctrl+Shift+A"), "Ctrl+R"), "command palette actions"),
     alias(k("tool.project", "Tool windows", "Project tree", "Alt+1", &["Alt+1"]), "sidebar files"),
     alias(k("tool.agents", "Tool windows", "Agents panel", "Alt+9", &["Alt+9"]), "claude"),
@@ -170,7 +171,6 @@ pub fn all() -> Vec<&'static Action> {
         TOOLS,
         GIT,
         AGENTS,
-        // HOOK(track A, decision 0013): crate::workspace::ACTIONS,
         // HOOK(track B, decision 0014): crate::index::ACTIONS,
         // HOOK(track C, decision 0015): crate::agents::mission::ACTIONS,
     ];

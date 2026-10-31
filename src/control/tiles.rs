@@ -102,17 +102,18 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 }
 
 fn workspace(app: &App) -> Tile {
-    let c = &app.control;
     let roots = hooks::roots(app);
     let mut rows = Vec::new();
     let mut dirty = 0;
+    let mut repos = 0;
     for root in &roots {
-        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        match c.repos.iter().find(|r| &r.root == root) {
+        let name = hooks::label(app, root);
+        match hooks::repo(app, root) {
             None => rows.push(row(name, "reading git…", Tone::Muted, Act::None)),
-            Some(r) => match &r.branch {
+            Some(r) => match r.branch.clone() {
                 None => rows.push(row(name, "not a git repository", Tone::Muted, Act::Tree)),
                 Some(b) => {
+                    repos += 1;
                     let mut parts = Vec::new();
                     if r.ahead > 0 {
                         parts.push(format!("↑{}", r.ahead));
@@ -136,7 +137,7 @@ fn workspace(app: &App) -> Tile {
                     let tone = if r.conflicts > 0 { Tone::Bad } else if clean { Tone::Good } else { Tone::Warn };
                     let right = if clean { "clean".to_string() } else { parts.join(" · ") };
                     rows.push(row(format!("⎇ {b}  {name}"), right, tone, Act::GitView(root.clone())));
-                    if let Some(u) = &r.upstream {
+                    if let Some(u) = r.upstream.as_ref().filter(|_| roots.len() == 1) {
                         let mut x = row(format!("   ↳ {u}"), if r.ahead + r.behind == 0 { "in sync" } else { "" }, Tone::Muted, Act::GitView(root.clone()));
                         x.left_tone = Tone::Muted;
                         rows.push(x);
@@ -146,8 +147,8 @@ fn workspace(app: &App) -> Tile {
         }
     }
     rows.push(row("project folder", hooks::short_path(&app.project.root), Tone::Muted, Act::Tree));
-    let repos = c.repos.iter().filter(|r| r.branch.is_some()).count();
-    let summary = if repos == 0 && !c.repos.is_empty() {
+    let loaded = roots.iter().all(|r| hooks::repo(app, r).is_some());
+    let summary = if repos == 0 && loaded {
         "no git repository".to_string()
     } else {
         format!("{} · {}", plural(roots.len(), "repo", "repos"), if dirty == 0 { "clean".into() } else { format!("{dirty} with changes") })

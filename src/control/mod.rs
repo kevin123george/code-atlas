@@ -241,8 +241,9 @@ impl App {
     /// Starts the background samples that are due (`force`: all of them now).
     fn control_refresh(&mut self, force: bool) {
         let due = |at: Option<Instant>, every: Duration| force || at.is_none_or(|t| t.elapsed() >= every);
+        let own = hooks::roots(self).into_iter().any(|r| self.workspace.status.get(&r).is_none());
         let c = &mut self.control;
-        if c.repos_job.is_none() && due(c.repos_at, REPOS_EVERY) {
+        if own && c.repos_job.is_none() && due(c.repos_at, REPOS_EVERY) {
             let roots = hooks::roots(self);
             let c = &mut self.control;
             c.repos_job = Some(crate::git::job(move || roots.iter().map(|r| repos::read(r)).collect()));
@@ -642,10 +643,7 @@ impl App {
         match act {
             Act::None => self.message = Some("Nothing to do on this row".into()),
             Act::Say(s) => self.message = Some(s),
-            Act::GitView(_root) => {
-                // HOOK(track A, decision 0013): open the Git view on that root.
-                self.git_view_tab('1');
-            }
+            Act::GitView(root) => hooks::git_view_on(self, &root),
             Act::Mission(run) => hooks::mission_control(self, run),
             Act::NewAgent => self.agents_new(),
             Act::Staff => self.refresh_staff(),

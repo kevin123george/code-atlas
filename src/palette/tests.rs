@@ -190,3 +190,19 @@ fn draws_names_keys_and_states() {
     drop(a);
     let _ = std::fs::remove_dir_all(d);
 }
+
+#[test]
+fn vim_normal_mode_keeps_ctrl_r_for_redo() {
+    let (mut a, d) = app("vimredo");
+    a.set_vim(true);
+    press(&mut a, "Ctrl+R");
+    assert!(!a.palette.open, "redo in Vim normal mode");
+    press(&mut a, "Ctrl+Shift+A");
+    assert!(a.palette.open, "Ctrl+Shift+A still opens it");
+    press(&mut a, "Esc");
+    press(&mut a, "i");
+    press(&mut a, "Ctrl+R");
+    assert!(a.palette.open, "insert mode: Find Action");
+    drop(a);
+    let _ = std::fs::remove_dir_all(d);
+}

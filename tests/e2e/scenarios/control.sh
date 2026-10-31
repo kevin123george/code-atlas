@@ -1,4 +1,4 @@
-# Control Center (Alt+O) and Find Action (Ctrl+O; Ctrl+Shift+A needs the kitty protocol, which
+# Control Center (Alt+O) and Find Action (Ctrl+R; Ctrl+Shift+A needs the kitty protocol, which
 # tmux lacks), decision 0016. A fake `ssh` keeps the Aa staff check off the network.
 
 no_ssh() { printf '#!/bin/sh\nexit 255\n' > bin/ssh; chmod +x bin/ssh; }
@@ -7,7 +7,7 @@ t_palette_runs_an_action() {
     no_ssh
     printf 'one\ntwo\n' > a.txt
     start 100 30 a.txt
-    key C-o
+    key C-r
     wait_for "Find Action"
     typ "dupl"
     wait_for "Duplicate line or selection"
@@ -18,7 +18,7 @@ t_palette_runs_an_action() {
     wait_line 3 "two"
     save
     assert_file a.txt $'one\none\ntwo\n'
-    key C-o                                       # recently used first
+    key C-r                                       # recently used first
     wait_for "recent"
     key Escape
     wait_gone "Find Action"
@@ -54,7 +54,7 @@ t_theme_switch_live() {
     printf 'fn main() {}\n' > a.rs
     start 100 30 a.rs
     tm capture-pane -e -p -t "$SESSION" | grep -q "48;2;9;11;16" || fail "dark paper missing"
-    key C-o
+    key C-r
     typ "light theme"
     wait_for "Ledger Terminal light"
     key Enter

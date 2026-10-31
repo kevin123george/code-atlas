@@ -11,8 +11,41 @@ use crate::app::App;
 
 /// The repositories / roots the workspace tile shows.
 pub fn roots(app: &App) -> Vec<PathBuf> {
-    // HOOK(track A, decision 0013): return the workspace's roots once `src/workspace/` lands.
-    vec![app.project.root.clone()]
+    // Track A (decision 0013): every root of the workspace.
+    let r: Vec<PathBuf> = app.project.ws.roots.iter().map(|r| r.path.clone()).collect();
+    if r.is_empty() { vec![app.project.root.clone()] } else { r }
+}
+
+/// A root's label in the workspace (its folder name otherwise).
+pub fn label(app: &App, root: &Path) -> String {
+    app.project.ws.roots.iter().find(|r| r.path == root).map(|r| r.label.clone()).unwrap_or_else(|| root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+}
+
+/// A root's git state: track A's background status when it has one (every repo, 10 s), else
+/// the Control Center's own read (`control::repos`).
+pub fn repo(app: &App, root: &Path) -> Option<super::repos::Repo> {
+    if let Some(s) = app.workspace.status.get(root) {
+        return Some(super::repos::Repo {
+            root: root.to_path_buf(),
+            name: label(app, root),
+            branch: s.is_repo().then(|| s.branch.clone().unwrap_or_else(|| "?".into())),
+            upstream: s.upstream.then(|| "upstream".to_string()),
+            ahead: s.ahead,
+            behind: s.behind,
+            changed: s.changed.saturating_sub(s.untracked),
+            untracked: s.untracked,
+            conflicts: s.conflicts,
+        });
+    }
+    app.control.repos.iter().find(|r| r.root == root).cloned()
+}
+
+/// Opens the Git view on a root (track A: switches the current repo first).
+pub fn git_view_on(app: &mut App, root: &Path) {
+    if let Some(i) = app.project.ws.roots.iter().position(|r| r.path == root) {
+        app.switch_repo(i, false);
+    }
+    app.git_view_tab('1');
 }
 
 pub struct IndexInfo {

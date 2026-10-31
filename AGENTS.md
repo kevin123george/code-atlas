@@ -145,11 +145,19 @@ highlighting only.
   `from_args` + `workspace_init` in `App::new`, `workspace_tick` in `App::tick`, `Project.ws` (+ `abs`/`show`,
   `index_roots`/`find_in_roots`, `Tree::new_multi`/`collapse_all`), `Git.label`/`project_dir`, `o` in the Git
   view, `draw_popup` + `marks` in `ui.rs`, `-w`/`--single` in `main.rs`, 4 hint contexts.
-- `src/config.rs` – `settings.toml` (`hints = true`, `autocomplete = true`) in the config folder: load (defaults on any
-  problem, field by field), save one key.
+- `src/config.rs` – `settings.toml` (`hints`, `autocomplete`, `vim`, `theme`; schema in `control::settings`) in the config folder: load (defaults on any
+  problem, field by field), save one key by editing just its line (comments kept).
 - `src/mackeys.rs` – macOS keys terminals mangle (decision 0010): Cmd chords with SUPER → Ctrl twins
   (editor only), `Ω`/`¸` (Option+Z without Option as Meta) → redo right after an undo. Hook: `App::handle`
   (editor branch) and `App.undo_chain`, set by the undo/redo arms in `idea_key`.
+- `src/control/` – Control Center (decision 0016): `mod.rs` state, keys, ticks, settings apply/save, toggles; `tiles.rs` tile rows
+  (data); `ui.rs` layout (3/2/1 columns); `widgets.rs` reusable drawing pieces; `theme.rs` palette registry + frame recolouring;
+  `settings.rs` schema + validation + template; `procs.rs` `ps` sampler; `repos.rs` git status per root; `hooks.rs` tracks A/B/C.
+  Hooks elsewhere: `App.control`, `control_key`/`control_paste`/`control_mouse` first in `App::handle`, `control::ui::draw` +
+  `theme::apply` at the end of `ui::draw`, `app.control_tick()` in the main loop, `vim` setting in `main.rs`, `theme::syntax_fg`
+  in `token_style`, `lsp/status.rs` (rows + restart), `Server::pid`, `Terminal::pid`.
+- `src/palette/` – Find Action: `actions.rs` **the action registry** (per-feature `ACTIONS` slices in `all()`), `mod.rs`
+  ranking, recent list, keys, `run_palette_action`; `ui.rs` the popup.
 - `docs/ROADMAP.md` – milestones and who owns which files. `docs/decisions/` – project decisions.
 
 ## Run & test
@@ -226,6 +234,15 @@ what has focus (title: `editor · IDEA`, `editor · selection`, `vim · NORMAL`,
 `project tree`, `go to file`, `agents · prompt`, `completion`, `prompt · Find`, …) and the fallback keys when the
 terminal has no kitty protocol. A mouse action with a key (tab click, tree open, wheel, dock tabs) or a fallback
 used where the real key works shows "Tip: key" at its top for 3 s.
+
+## Keys (Control Center, Find Action, settings, themes)
+Decision 0016.
+| Key | Does |
+|---|---|
+| **Alt+O** (Option+O; `ø` where Option isn't Meta) | Control Center: workspace, agents (cost today, attention, Aa staff), language servers (restart), index, editor (problems, unsaved, memory/CPU), settings · Tab tiles · ↑↓ rows · Enter act · `r` restart / refresh · `m` agents · `2` settings · `e`/`l` open settings.toml / languages.toml · Esc |
+| **Ctrl+Shift+A** (kitty), **Ctrl+R** (every terminal; not in the terminal pane or Vim normal mode, where it stays the shell's / redo) | Find Action: every action, fuzzy, recent first, with its key; Enter runs it like the key |
+| settings screen | ↑↓ · Enter / Space change (saved, comments kept) · ←/→ previous / next choice · Esc back |
+Themes: `ledger-dark` (default), `ledger-light`, `high-contrast` (`theme = …` in settings.toml, the settings tile, or Find Action "theme"); they switch live.
 
 ## Keys (project view)
 | Key | Does |
@@ -444,6 +461,7 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 
 ## Decisions
 `docs/decisions/0013-workspaces.md` – workspaces: several roots (`label › path`), opening rules (folders, `*.catlas.toml`, `.code-atlas/workspace.toml`, folder of repos, `--single`), `@repo` scoping, multi-root tree + badges, background status of every repo, current repo follows the editor, Repos popup (Ctrl+O), fetch/pull all behind a question, recent workspaces (`-w`), LSP per root unchanged.
+`docs/decisions/0016-control-center.md` – Control Center (Alt+O, ø), Find Action (Ctrl+Shift+A / Ctrl+R) with the action registry, typed settings saved line by line, palette registry of themes recolouring the frame, hooks for tracks A/B/C.
 `docs/decisions/0012-git-view.md` – Git view: review of working tree / agent run / commit as one live document (1 s refresh, fingerprint), Ctrl+L / Alt+8, single-letter keys, hunk stage/unstage via `git apply --cached`, partial commits from the index, revert with confirm + byte-level undo, run snapshots (temp index, user's index untouched) + Ctrl+D, log with own lane graph and ✳ for Claude commits, blame with `--contents -`, branches popup, push/pull/fetch behind a question.
 `docs/decisions/0011-autocomplete.md` – completion as you type (100 ms pause, server trigger characters, not in comments/strings/prose, newest answer only), Ctrl+J / Ctrl+@ next to Ctrl+Space (macOS takes it), Enter on a typed-out word = new line, word completion from open buffers (alone or under few server items), `autocomplete` setting.
 `docs/decisions/0010-mac-undo-and-xml.md` – Cmd+Z/Cmd chords via SUPER (editor only), Ω-after-undo redo, Alt+Shift+Z, "Nothing to undo", no-op edits make no undo step, XML/DTD highlighting (tree-sitter-xml), per-line `<!-- -->` comments, lemminx entry.
@@ -458,6 +476,7 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 `docs/decisions/0007-more-language-servers.md` – languages.toml layers + merge rules, server per language, fallback on a failed start, `also` servers, snippets, pull diagnostics, new keys, what was installed.
 
 ## Current state (2026-10-28)
+Control Center done 2026-10-31 (track D, decision 0016, see Keys (Control Center …)): Alt+O view with six tiles (3/2/1 columns at 170/110/80), Find Action with an action registry (70+ actions, recent first, checked against the hint table), settings screen + `vim`/`theme` keys written line by line, three themes recolouring the whole frame, LSP restart, process memory/CPU. Track A wired; B (index) and C (Mission Control) are `HOOK(track …)` points in `src/control/hooks.rs`. Tests: unit (control, palette, theme contrast, settings writer, ps parsing, lsp status, 3 new hint contexts) + e2e `scenarios/control.sh` (palette runs an action, toggle persists across a restart, live theme switch from tmux colours, 80 and 200 columns).
 Workspaces done 2026-10-28 (track A, decision 0013, see Keys (workspaces)): several repos at once (`catlas a b`,
 `*.catlas.toml`, a folder of repos such as `~/Projects` → 16 roots), tree with a top row and badge per repo,
 collapse all, `repo › path` everywhere, `@repo` search scoping, Go to File / Recent / Find in Files / Search
