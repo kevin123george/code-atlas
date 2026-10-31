@@ -137,7 +137,7 @@ pub fn draw_popup(buf: &mut Buffer, p: &mut Project, area: Rect) -> Option<Posit
         _ => format!(" {} ", kind.title()),
     };
     let bottom = if kind == PopupKind::Quick {
-        " ↑↓ select · Enter open · Tab files/text · Alt+F1 tree · Esc "
+        " ↑↓ select · Enter open · Tab files/symbols/text · Alt+F1 tree · Esc "
     } else {
         " ↑↓ select · Enter open · Esc close "
     };
@@ -286,6 +286,7 @@ fn draw_quick(buf: &mut Buffer, p: &mut Project, r: Rect, list: Rect) {
                 let rr = Rect::new(row_rect.x + 1, y, row_rect.width.saturating_sub(1), 1);
                 match it {
                     Item::File(i) => draw_match(buf, p, i, rr, bg),
+                    Item::Sym(i) => draw_sym(buf, p, i, rr, bg),
                     Item::Hit(i) => draw_hit(buf, p, i, rr, bg),
                 }
             }
@@ -302,6 +303,12 @@ fn draw_header(buf: &mut Buffer, p: &Project, sec: Section, r: Rect) {
             let more = if shown < n { format!("{shown} of {n} · Tab for all") } else { format!("{n}") };
             let busy = if p.indexing() { " · indexing…" } else { "" };
             ("FILES", format!("{more}{busy}"))
+        }
+        Section::Symbols => {
+            let n = p.syms.len();
+            let shown = if p.quick.mode == Mode::All { n.min(super::quick::ALL_SYMBOLS) } else { n };
+            let more = if shown < n { format!("{shown} of {n} · Tab for all") } else { format!("{n}") };
+            ("SYMBOLS", more)
         }
         Section::Text => {
             let n = p.hits.len();
@@ -381,6 +388,33 @@ fn draw_match(buf: &mut Buffer, p: &Project, i: usize, r: Rect, bg: ratatui::sty
             x = put(buf, x, r.y, c, end, st.bg(bg));
         }
     }
+}
+
+/// A symbol row (code index): kind, the name with the matched letters in the accent, then
+/// `path:line` in muted on the right.
+fn draw_sym(buf: &mut Buffer, p: &Project, i: usize, r: Rect, bg: ratatui::style::Color) {
+    let s = &p.syms[i];
+    let end = r.right();
+    let q = p.popup.as_ref().map(|x| super::split_line_suffix(x.input.trim()).0.to_string()).unwrap_or_default();
+    let pos = fuzzy_pos(&q, &s.name);
+    let (x, _) = buf.set_stringn(r.x, r.y, format!("{:<4}", s.kind.label()), 4, Style::new().fg(S_VIOLET).bg(bg));
+    let mut x = put(buf, x, r.y, ' ', end, Style::new().bg(bg));
+    for (k, c) in s.name.chars().enumerate() {
+        let st = if pos.binary_search(&k).is_ok() { Style::new().fg(ACCENT).add_modifier(Modifier::BOLD) } else { Style::new().fg(TEXT).add_modifier(Modifier::BOLD) };
+        x = put(buf, x, r.y, c, end, st.bg(bg));
+    }
+    let loc = format!("{}:{}", s.path, s.line + 1);
+    let room = end.saturating_sub(x + 2) as usize;
+    let n = loc.chars().count();
+    if room >= 8 {
+        let shown: String = if n > room { format!("…{}", loc.chars().skip(n + 1 - room).collect::<String>()) } else { loc };
+        let w = shown.chars().count() as u16;
+        buf.set_string(end - w, r.y, shown, Style::new().fg(MUTED).bg(bg));
+    }
+}
+
+fn fuzzy_pos(q: &str, name: &str) -> Vec<usize> {
+    super::fuzzy::score(q, name).map(|(_, p)| p).unwrap_or_default()
 }
 
 /// A find-in-files row: `path:line` then the line, with the match in the accent.

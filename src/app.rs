@@ -117,7 +117,16 @@ impl App {
             hints: crate::hints::Hints::load(),
             git_view: crate::git::view::GitView::default(),
             undo_chain: false,
-        })
+        }
+        .with_large_note())
+    }
+
+    /// A file opened from the command line in large-file mode says so (decision 0014).
+    fn with_large_note(mut self) -> Self {
+        if let Some(n) = self.docs.iter().find_map(|d| d.large_note()) {
+            self.message = Some(n);
+        }
+        self
     }
 
     /// Turns Vim mode on or off.

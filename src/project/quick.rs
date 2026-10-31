@@ -22,6 +22,8 @@ use super::{fuzzy, split_line_suffix, PopupKind, Project, Target};
 
 /// File-name rows shown in the "All" tab (the "Files" tab shows them all).
 pub const ALL_FILES: usize = 8;
+/// Symbol rows shown in the "All" tab.
+pub const ALL_SYMBOLS: usize = 6;
 
 /// The popup's tabs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -29,24 +31,27 @@ pub enum Mode {
     #[default]
     All,
     Files,
+    Symbols,
     Text,
 }
 
 impl Mode {
-    pub const TABS: [Mode; 3] = [Mode::All, Mode::Files, Mode::Text];
+    pub const TABS: [Mode; 4] = [Mode::All, Mode::Files, Mode::Symbols, Mode::Text];
 
     pub fn label(self) -> &'static str {
         match self {
             Mode::All => "All",
             Mode::Files => "Files",
+            Mode::Symbols => "Symbols",
             Mode::Text => "Text",
         }
     }
 
-    /// Tab: All → Files → Text → All (Shift+Tab backwards).
+    /// Tab: All → Files → Symbols → Text → All (Shift+Tab backwards).
     pub fn next(self, back: bool) -> Mode {
+        let n = Mode::TABS.len();
         let i = Mode::TABS.iter().position(|m| *m == self).unwrap_or(0);
-        Mode::TABS[(i + if back { 2 } else { 1 }) % 3]
+        Mode::TABS[(i + if back { n - 1 } else { 1 }) % n]
     }
 }
 
@@ -63,6 +68,8 @@ pub struct Quick {
 pub enum Item {
     /// Index into `Project::matches`.
     File(usize),
+    /// Index into `Project::syms` (code index symbols).
+    Sym(usize),
     /// Index into `Project::hits`.
     Hit(usize),
 }
@@ -77,6 +84,7 @@ pub enum Row {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Section {
     Files,
+    Symbols,
     Text,
 }
 
@@ -85,33 +93,40 @@ pub fn in_scope(path: &str, scope: &str) -> bool {
     path.strip_prefix(scope).is_some_and(|r| r.starts_with('/'))
 }
 
-/// The selectable rows for `mode`: file names first, then content hits.
-pub fn items(mode: Mode, files: usize, hits: usize) -> Vec<Item> {
-    let files = match mode {
-        Mode::All => files.min(ALL_FILES),
-        Mode::Files => files,
-        Mode::Text => 0,
+/// The selectable rows for `mode`: file names first, then symbols, then content hits.
+pub fn items(mode: Mode, files: usize, syms: usize, hits: usize) -> Vec<Item> {
+    let (files, syms, hits) = match mode {
+        Mode::All => (files.min(ALL_FILES), syms.min(ALL_SYMBOLS), hits),
+        Mode::Files => (files, 0, 0),
+        Mode::Symbols => (0, syms, 0),
+        Mode::Text => (0, 0, hits),
     };
-    let hits = if mode == Mode::Files { 0 } else { hits };
-    (0..files).map(Item::File).chain((0..hits).map(Item::Hit)).collect()
+    (0..files).map(Item::File).chain((0..syms).map(Item::Sym)).chain((0..hits).map(Item::Hit)).collect()
+}
+
+fn section(it: Item) -> Section {
+    match it {
+        Item::File(_) => Section::Files,
+        Item::Sym(_) => Section::Symbols,
+        Item::Hit(_) => Section::Text,
+    }
 }
 
 /// The rows as drawn: a header before each section that has something to say. The Text header
 /// also shows while a search runs or found nothing, so it's clear content is searched too.
-pub fn rows(mode: Mode, files: usize, hits: usize, text_header: bool) -> Vec<Row> {
-    let its = items(mode, files, hits);
-    let mut out = Vec::with_capacity(its.len() + 2);
-    let nfiles = its.iter().filter(|i| matches!(i, Item::File(_))).count();
-    if nfiles > 0 {
-        out.push(Row::Header(Section::Files));
-    }
-    for (k, it) in its.iter().enumerate() {
-        if k == nfiles && mode != Mode::Files {
-            out.push(Row::Header(Section::Text));
+pub fn rows(mode: Mode, files: usize, syms: usize, hits: usize, text_header: bool) -> Vec<Row> {
+    let its = items(mode, files, syms, hits);
+    let mut out = Vec::with_capacity(its.len() + 3);
+    let mut last: Option<Section> = None;
+    for it in &its {
+        let sec = section(*it);
+        if last != Some(sec) {
+            out.push(Row::Header(sec));
+            last = Some(sec);
         }
         out.push(Row::Item(*it));
     }
-    if nfiles == its.len() && mode != Mode::Files && text_header {
+    if last != Some(Section::Text) && matches!(mode, Mode::All | Mode::Text) && text_header {
         out.push(Row::Header(Section::Text));
     }
     out
@@ -145,7 +160,7 @@ pub struct TreeSnap {
 
 impl Project {
     pub fn quick_items(&self) -> Vec<Item> {
-        items(self.quick.mode, self.matches.len(), self.hits.len())
+        items(self.quick.mode, self.matches.len(), self.syms.len(), self.hits.len())
     }
 
     /// Whether the Text section has a header even with no hits (a query long enough to search).
@@ -154,7 +169,7 @@ impl Project {
     }
 
     pub fn quick_rows(&self) -> Vec<Row> {
-        rows(self.quick.mode, self.matches.len(), self.hits.len(), self.quick_text_header())
+        rows(self.quick.mode, self.matches.len(), self.syms.len(), self.hits.len(), self.quick_text_header())
     }
 
     /// The selected quick-search row as a file to open.
@@ -165,6 +180,10 @@ impl Project {
                 let m = self.matches.get(i)?;
                 let at = split_line_suffix(p.input.trim()).1.map(|(l, c)| (l.saturating_sub(1), c.saturating_sub(1), 0));
                 Some(Target { path: self.root.join(&m.path), at })
+            }
+            Item::Sym(i) => {
+                let s = self.syms.get(i)?;
+                Some(Target { path: s.abs(), at: Some((s.line as usize, s.col as usize, s.name.chars().count())) })
             }
             Item::Hit(i) => Some(hit_target(&self.root, self.hits.get(i)?)),
         }
@@ -341,30 +360,38 @@ mod tests {
     #[test]
     fn modes_cycle_both_ways() {
         assert_eq!(Mode::All.next(false), Mode::Files);
+        assert_eq!(Mode::Files.next(false), Mode::Symbols);
         assert_eq!(Mode::Text.next(false), Mode::All);
         assert_eq!(Mode::All.next(true), Mode::Text);
     }
 
     #[test]
     fn items_put_files_first_and_cap_them_in_all() {
-        let it = items(Mode::All, 20, 3);
+        let it = items(Mode::All, 20, 0, 3);
         assert_eq!(it.len(), ALL_FILES + 3);
         assert_eq!(it[0], Item::File(0));
         assert_eq!(it[ALL_FILES], Item::Hit(0));
-        assert_eq!(items(Mode::Files, 20, 3).len(), 20);
-        assert_eq!(items(Mode::Text, 20, 3), vec![Item::Hit(0), Item::Hit(1), Item::Hit(2)]);
+        assert_eq!(items(Mode::Files, 20, 5, 3).len(), 20);
+        assert_eq!(items(Mode::Text, 20, 5, 3), vec![Item::Hit(0), Item::Hit(1), Item::Hit(2)]);
+        let it = items(Mode::All, 2, 10, 1);
+        assert_eq!(it.len(), 2 + ALL_SYMBOLS + 1);
+        assert_eq!(it[2], Item::Sym(0));
+        assert_eq!(items(Mode::Symbols, 2, 10, 1).len(), 10);
     }
 
     #[test]
     fn rows_have_section_headers() {
         use Row::*;
-        let r = rows(Mode::All, 2, 1, true);
+        let r = rows(Mode::All, 2, 0, 1, true);
         assert_eq!(r, vec![Header(Section::Files), Item(super::Item::File(0)), Item(super::Item::File(1)), Header(Section::Text), Item(super::Item::Hit(0))]);
+        let r = rows(Mode::All, 1, 1, 0, true);
+        assert_eq!(r, vec![Header(Section::Files), Item(super::Item::File(0)), Header(Section::Symbols), Item(super::Item::Sym(0)), Header(Section::Text)]);
         // Text header while searching / nothing found yet; none for a one-letter query.
-        assert_eq!(rows(Mode::All, 1, 0, true).last(), Some(&Header(Section::Text)));
-        assert_eq!(rows(Mode::All, 1, 0, false).len(), 2);
-        assert_eq!(rows(Mode::Text, 5, 0, true), vec![Header(Section::Text)]);
-        assert!(!rows(Mode::Files, 1, 4, true).contains(&Header(Section::Text)));
+        assert_eq!(rows(Mode::All, 1, 0, 0, true).last(), Some(&Header(Section::Text)));
+        assert_eq!(rows(Mode::All, 1, 0, 0, false).len(), 2);
+        assert_eq!(rows(Mode::Text, 5, 0, 0, true), vec![Header(Section::Text)]);
+        assert!(!rows(Mode::Files, 1, 0, 4, true).contains(&Header(Section::Text)));
+        assert!(!rows(Mode::Symbols, 1, 2, 4, true).contains(&Header(Section::Text)));
     }
 
     #[test]
@@ -407,10 +434,12 @@ mod tests {
         assert_eq!(p.quick.mode, Mode::Files);
         assert!(p.quick_items().iter().all(|i| matches!(i, Item::File(_))));
         key(&mut p, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(p.quick.mode, Mode::Symbols);
+        key(&mut p, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(p.quick.mode, Mode::Text);
         assert!(p.quick_items().iter().all(|i| matches!(i, Item::Hit(_))));
         key(&mut p, KeyCode::BackTab, KeyModifiers::SHIFT);
-        assert_eq!(p.quick.mode, Mode::Files);
+        assert_eq!(p.quick.mode, Mode::Symbols);
         std::fs::remove_dir_all(root).unwrap();
     }
 

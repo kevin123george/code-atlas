@@ -359,6 +359,12 @@ impl Syntax {
         Syntax { lang, parser, tree: None, source: String::new(), rev: None, cache: None }
     }
 
+    /// The same state named `lang` (large files keep their language name without a parser).
+    pub fn with_lang(mut self, lang: Lang) -> Self {
+        self.lang = lang;
+        self
+    }
+
     pub fn detect(path: Option<&Path>, rope: &Rope) -> Self {
         let first: String = rope.lines().next().map(|l| l.chars().take(200).collect()).unwrap_or_default();
         Self::new(Lang::detect(path, &first))

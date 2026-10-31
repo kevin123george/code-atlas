@@ -56,7 +56,8 @@ pub fn list_dir(dir: &Path) -> Vec<(String, PathBuf, bool)> {
             (e.file_name().to_string_lossy().into_owned(), e.into_path(), is_dir)
         })
         .collect();
-    out.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())).then_with(|| a.0.cmp(&b.0)));
+    // Lowercased once per entry, not per comparison (folders with 100 000 entries).
+    out.sort_by_cached_key(|e| (!e.2, e.0.to_lowercase(), e.0.clone()));
     out
 }
 

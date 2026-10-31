@@ -8,6 +8,7 @@ mod dock;
 mod doc;
 mod git;
 mod hints;
+mod index;
 mod project;
 mod lsp;
 mod mackeys;
@@ -38,12 +39,17 @@ fn main() -> Result<()> {
         println!("  --vim        start in Vim mode (also CATLAS_VIM=1; Ctrl+Alt+V toggles at runtime)");
         println!("  --no-hints   start without the shortcut helper (Alt+/ toggles it and saves the choice)");
         println!("catlas --health [dir]   which languages have highlighting and which language servers are installed");
+        println!("catlas --index-status [dir]   the code index of a folder: files, symbols, size, cache folder, what changed since");
+        println!("catlas --bench-index <dir> [--files N] [--keep]   benchmark the code index (an empty or missing dir gets a synthetic repo of N files)");
         return Ok(());
     }
     if args.first().is_some_and(|a| a == "--health") {
         let dir = args.get(1).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
         lsp::health::run(&dir);
         return Ok(());
+    }
+    if args.first().is_some_and(|a| a == "--index-status" || a == "--bench-index") {
+        return index::cli::run(&args);
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
         println!("catlas {}", env!("CARGO_PKG_VERSION"));

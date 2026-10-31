@@ -11,7 +11,9 @@ pub mod search;
 pub mod tree;
 pub mod ui;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -85,9 +87,20 @@ pub struct Project {
     /// Most recent first, absolute.
     pub recent: Vec<PathBuf>,
 
-    /// All project files (relative), filled in the background.
-    pub files: Vec<String>,
+    /// All project files (relative), from the code index or a walk in the background.
+    pub files: Arc<Vec<String>>,
     index: Option<Job<Vec<String>>>,
+    /// The persistent code index (decision 0014; `None` when it's off): file names, contents
+    /// and symbols without walking the disk. Multi-root workspaces add their roots to it.
+    pub code_index: Option<crate::index::Index>,
+    /// Generation of the index view `files` came from.
+    index_gen: u64,
+    /// Search Everywhere's SYMBOLS section (from the code index).
+    pub syms: Vec<crate::index::SymbolHit>,
+    sym_job: Option<Job<Vec<crate::index::SymbolHit>>>,
+    /// The running search walks the scope folder (paths come relative to it).
+    prefix_scope: bool,
+    hit_paths: HashSet<String>,
     /// Finder / recent rows for the current input.
     pub matches: Vec<Match>,
     matches_stale: bool,
@@ -153,15 +166,29 @@ pub fn split_line_suffix(q: &str) -> (&str, Option<(usize, usize)>) {
 
 impl Project {
     pub fn new(root: PathBuf, show_sidebar: bool) -> Self {
+        Self::with_index(root, show_sidebar, crate::index::Index::from_settings())
+    }
+
+    /// A project that uses `index` (its root is added to it) for files, contents and symbols.
+    pub fn with_index(root: PathBuf, show_sidebar: bool, code_index: Option<crate::index::Index>) -> Self {
+        if let Some(i) = &code_index {
+            i.add_root(&root);
+        }
         Project {
             tree: Tree::new(&root),
             index: Some(search::index_files(root.clone())),
+            code_index,
+            index_gen: 0,
+            syms: Vec::new(),
+            sym_job: None,
+            prefix_scope: false,
+            hit_paths: HashSet::new(),
             root,
             sidebar: show_sidebar,
             focus_tree: false,
             popup: None,
             recent: Vec::new(),
-            files: Vec::new(),
+            files: Arc::new(Vec::new()),
             matches: Vec::new(),
             matches_stale: true,
             hits: Vec::new(),
@@ -201,19 +228,41 @@ impl Project {
         self.matches_stale = true;
     }
 
+    /// The code index's current view of the project root, if there is one.
+    pub fn index_view(&self) -> Option<Arc<crate::index::View>> {
+        self.code_index.as_ref()?.view(&self.root)
+    }
+
     /// Drains the background jobs; called every loop turn (at least every 250 ms).
     pub fn poll(&mut self) {
+        // The code index's file list replaces the walk (and follows changes on disk).
+        if let Some(v) = self.index_view().filter(|v| v.files_ready && v.gen != self.index_gen) {
+            self.index_gen = v.gen;
+            if !Arc::ptr_eq(&self.files, &v.files) {
+                self.files = v.files.clone();
+                self.matches_stale = true;
+            }
+            self.index = None;
+        }
+        if let Some(job) = self.sym_job.take() {
+            match job.rx.try_recv() {
+                Ok(s) => self.syms = s,
+                Err(_) if !job.done() => self.sym_job = Some(job),
+                Err(_) => {}
+            }
+        }
         if let Some(job) = &self.index {
             let before = self.files.len();
+            let files = Arc::make_mut(&mut self.files);
             while let Ok(batch) = job.rx.try_recv() {
-                self.files.extend(batch);
+                files.extend(batch);
             }
             let done = job.done();
             if done {
                 while let Ok(batch) = job.rx.try_recv() {
-                    self.files.extend(batch);
+                    files.extend(batch);
                 }
-                self.files.sort_unstable();
+                files.sort_unstable();
                 self.index = None;
             }
             if self.files.len() != before || done {
@@ -240,19 +289,24 @@ impl Project {
     }
 
     fn push_hits(&mut self, mut batch: Vec<Hit>) {
-        // A scoped search walks the folder: paths come relative to it.
-        if let Some(s) = &self.search_scope {
+        // A scoped walk of the folder gives paths relative to it.
+        if let (Some(s), true) = (&self.search_scope, self.prefix_scope) {
             for h in &mut batch {
                 h.path = format!("{s}/{}", h.path);
             }
         }
         // Search Everywhere lists each line once (its first match); Find in Files every match.
         if self.popup.as_ref().is_some_and(|p| p.kind == PopupKind::Quick) {
-            batch.dedup_by(|b, a| a.line == b.line);
+            batch.dedup_by(|b, a| a.line == b.line && a.path == b.path);
         }
         let room = search::MAX_HITS.saturating_sub(self.hits.len());
         if room > 0 && !batch.is_empty() {
-            self.hit_files += 1;
+            for h in batch.iter().take(room) {
+                if !self.hit_paths.contains(&h.path) {
+                    self.hit_paths.insert(h.path.clone());
+                }
+            }
+            self.hit_files = self.hit_paths.len();
             self.hits.extend(batch.into_iter().take(room));
         }
     }
@@ -261,6 +315,7 @@ impl Project {
         let q = self.popup.as_ref().map(|p| p.input.clone()).unwrap_or_default();
         self.hits.clear();
         self.hit_files = 0;
+        self.hit_paths.clear();
         self.searched = q.clone();
         if let Some(p) = &mut self.popup {
             p.selected = 0;
@@ -268,9 +323,35 @@ impl Project {
         }
         let scope = self.popup.as_ref().filter(|p| p.kind == PopupKind::Quick).and(self.quick.scope.clone());
         let dir = scope.as_ref().map_or_else(|| self.root.clone(), |s| self.root.join(s));
-        self.search_scope = scope;
         // Dropping the old job cancels it.
-        self.search = (q.trim().chars().count() >= 2).then(|| search::find_in_files(dir, q));
+        self.search = None;
+        if q.trim().chars().count() >= 2 {
+            let opts = crate::index::FindOpts {
+                per_line: self.popup.as_ref().is_some_and(|p| p.kind == PopupKind::Quick),
+                boost: self.recent.iter().map(|r| self.rel(r)).collect(),
+            };
+            let indexed = self.code_index.as_ref().and_then(|i| i.find(&self.root, scope.clone(), q.clone(), opts));
+            self.prefix_scope = indexed.is_none();
+            self.search = Some(indexed.unwrap_or_else(|| search::find_in_files(dir, q)));
+        }
+        self.search_scope = scope;
+    }
+
+    /// Search Everywhere's symbols for the current input (code index only; no debounce: the
+    /// symbol tables are in memory).
+    fn start_symbols(&mut self) {
+        let q = self.popup.as_ref().map(|p| p.input.trim().to_string()).unwrap_or_default();
+        let (q, _) = split_line_suffix(&q);
+        self.sym_job = None;
+        if q.chars().count() < 2 {
+            self.syms.clear();
+            return;
+        }
+        let scope = self.quick.scope.clone();
+        self.sym_job = self.code_index.as_ref().and_then(|i| i.find_symbols(Some(&self.root), scope, q.to_string(), 40));
+        if self.sym_job.is_none() {
+            self.syms.clear();
+        }
     }
 
     /// Recomputes the finder / recent rows for the current input.
@@ -324,13 +405,19 @@ impl Project {
         if kind == PopupKind::Quick {
             self.hits.clear();
             self.hit_files = 0;
+            self.hit_paths.clear();
             self.search = None;
             self.searched = String::new();
+            self.syms.clear();
+            self.sym_job = None;
         }
         self.snap_tree();
         self.popup = Some(Popup { kind, input, selected: 0, scroll: 0 });
         if research {
             self.search_due = Some(Instant::now().checked_sub(SEARCH_DEBOUNCE).unwrap_or_else(Instant::now));
+        }
+        if kind == PopupKind::Quick {
+            self.start_symbols();
         }
         self.matches_stale = true;
         self.refilter_if_list();
@@ -387,6 +474,7 @@ impl Project {
             PopupKind::Quick => {
                 self.search_due = Some(Instant::now());
                 self.refilter();
+                self.start_symbols();
             }
             _ => self.refilter(),
         }
@@ -781,9 +869,10 @@ impl App {
                 d.select(s, (s + len).min(d.line_end(d.line())));
             }
         }
+        let note = self.docs[i].large_note();
         self.project.note_opened(&want);
         self.project.focus_tree = false;
-        self.message = Some(self.project.rel(&want));
+        self.message = Some(note.unwrap_or_else(|| self.project.rel(&want)));
         self.follow = true;
     }
 }

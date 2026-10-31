@@ -36,6 +36,26 @@ pub struct Clip {
     pub whole_line: bool,
 }
 
+/// A line this long (bytes) opens the file in large-file mode.
+pub const LONG_LINE: usize = 20_000;
+
+/// Whether `text` should open in large-file mode: more than `limit` bytes or a very long line.
+pub fn is_large(text: &[u8], limit: u64) -> bool {
+    if text.len() as u64 > limit {
+        return true;
+    }
+    let mut start = 0;
+    for (i, &b) in text.iter().enumerate() {
+        if b == b'\n' {
+            if i - start >= LONG_LINE {
+                return true;
+            }
+            start = i + 1;
+        }
+    }
+    text.len() - start >= LONG_LINE
+}
+
 pub struct Doc {
     pub rope: Rope,
     pub path: Option<PathBuf>,
@@ -58,6 +78,9 @@ pub struct Doc {
     group: Option<bool>,
     /// Language, parse tree and highlighting (M3, `src/syntax/`).
     pub syntax: crate::syntax::Syntax,
+    /// Opened in large-file mode (decision 0014): bigger than `large_file_mb` or with a line of
+    /// [`LONG_LINE`]+ bytes. No highlighting, language server or git gutter.
+    pub large: bool,
 }
 
 impl Doc {
@@ -72,13 +95,25 @@ impl Doc {
 
     /// Opens `path`; a file that doesn't exist yet becomes an empty document saved there later.
     pub fn open(path: &Path) -> Result<Self> {
+        let mut large = false;
         let rope = if path.exists() {
             let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+            large = is_large(text.as_bytes(), crate::config::Settings::get().large_file_mb << 20);
             Rope::from_str(&text)
         } else {
             Rope::new()
         };
-        Ok(Self::from_rope(rope, Some(path.to_path_buf())))
+        let mut d = Self::from_rope(rope, Some(path.to_path_buf()));
+        if large {
+            d.large = true;
+            d.syntax = crate::syntax::Syntax::new(crate::syntax::Lang::Plain).with_lang(d.syntax.lang);
+        }
+        Ok(d)
+    }
+
+    /// The status-bar note for a file opened in large-file mode.
+    pub fn large_note(&self) -> Option<String> {
+        self.large.then(|| format!("Large file ({:.0} MB): highlighting, language server and git gutter are off", self.rope.len_bytes() as f64 / (1u64 << 20) as f64))
     }
 
     fn from_rope(rope: Rope, path: Option<PathBuf>) -> Self {
@@ -86,6 +121,7 @@ impl Doc {
         let syntax = crate::syntax::Syntax::detect(path.as_deref(), &rope);
         Doc {
             syntax,
+            large: false,
             rope,
             path,
             cursor: 0,
@@ -121,6 +157,9 @@ impl Doc {
     /// Changes the file name (Save as) and picks the language again.
     pub fn set_path(&mut self, path: PathBuf) {
         self.syntax = crate::syntax::Syntax::detect(Some(&path), &self.rope);
+        if self.large {
+            self.syntax = crate::syntax::Syntax::new(crate::syntax::Lang::Plain).with_lang(self.syntax.lang);
+        }
         self.path = Some(path);
     }
 

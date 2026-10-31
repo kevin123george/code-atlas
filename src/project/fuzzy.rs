@@ -20,6 +20,11 @@ pub fn score(query: &str, candidate: &str) -> Option<(i32, Vec<usize>)> {
     if q.is_empty() {
         return Some((0, Vec::new()));
     }
+    // Most candidates don't match at all: reject them without allocating (ASCII fast path;
+    // a 500 000-path Go to File scans every path per keystroke).
+    if query.is_ascii() && candidate.is_ascii() && !ascii_subsequence(query.as_bytes(), candidate.as_bytes()) {
+        return None;
+    }
     let orig: Vec<char> = candidate.chars().take(MAX_LEN).collect();
     let low: Vec<char> = orig.iter().map(|c| c.to_lowercase().next().unwrap_or(*c)).collect();
     let (n, m) = (orig.len(), q.len());
@@ -102,6 +107,15 @@ pub fn score(query: &str, candidate: &str) -> Option<(i32, Vec<usize>)> {
     }
     // Shorter paths win ties.
     Some((best - (n as i32) / 8, pos))
+}
+
+fn ascii_subsequence(q: &[u8], s: &[u8]) -> bool {
+    let s = &s[..s.len().min(MAX_LEN)];
+    let mut it = s.iter();
+    q.iter().filter(|c| !c.is_ascii_whitespace()).all(|c| {
+        let c = c.to_ascii_lowercase();
+        it.any(|x| x.to_ascii_lowercase() == c)
+    })
 }
 
 fn is_subsequence(q: &[char], s: &[char]) -> bool {
