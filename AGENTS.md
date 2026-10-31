@@ -24,7 +24,7 @@ lua, json, yaml, toml-ng, html, css, md, containerfile, sequel, xml (+ DTD); the
 `lsp-types` 0.97 + `serde_json` with an own JSON-RPC client (LSP), `toml` (`languages.toml`).
 `serde` + `serde_json` also for the agents panel (stream-json, `agents.json`); agents run the `claude` CLI.
 `portable-pty` 0.9 + `vt100` 0.15 (terminal pane; vt100 0.16 conflicts with ratatui's pinned `unicode-width`),
-`similar` (line diffs) and the `git` CLI (git).
+`similar` (line diffs) and the `git` CLI (git). `notify` 8.2 (FSEvents / inotify) for the code index (decision 0014).
 Language servers: which one runs for which language comes from `languages.toml` (see **Language servers** below);
 they're found on PATH plus `~/.cargo/bin`, `~/.local/bin`, `~/.bun/bin`, `/opt/homebrew/bin`, `/usr/local/bin`.
 Installed on the Mac (2026-10-25, decision 0007): `npm i -g typescript typescript-language-server pyright
@@ -155,6 +155,18 @@ highlighting only.
   `from_args` + `workspace_init` in `App::new`, `workspace_tick` in `App::tick`, `Project.ws` (+ `abs`/`show`,
   `index_roots`/`find_in_roots`, `Tree::new_multi`/`collapse_all`), `Git.label`/`project_dir`, `o` in the Git
   view, `draw_popup` + `marks` in `ui.rs`, `-w`/`--single` in `main.rs`, 4 hint contexts.
+- `src/index/` – the persistent code index (decision 0014): `mod.rs` `Index` (a handle over several roots:
+  `add_root` / `remove_root`, `find`, `find_symbols`, `busy`, `cache_dir`); `root.rs` one root's worker (load
+  cache → publish `View` → mtime/size scan → index → watch → compact; `pending` files, read-only second
+  instance); `segment.rs` the on-disk segment (builder, reader with `pread` postings, streaming merge);
+  `trigram.rs` trigrams, varint postings, intersection, FNV; `symbols.rs` tree-sitter definition queries per
+  language; `query.rs` candidates → verify → rank, symbol search; `watch.rs` `notify` + event filter;
+  `glue.rs` Alt+N picker merge; `ui.rs` status-bar `⟳ Indexing 45%`; `cli.rs` `--index-status`,
+  `--bench-index` (synthetic repo generator); `tests.rs` (vs brute-force search). Hooks elsewhere:
+  `Project.code_index` (`Project::with_index`, `poll` takes its file list, `start_search` / `start_symbols`),
+  `Item::Sym` / `Mode::Symbols` in `quick.rs`, `draw_sym` in `project/ui.rs`, `Picker::merge` + `Lsp.idx_syms`
+  + `open_symbols` in `lsp/`, `index::ui::draw_status` in `ui.rs`, `--index-status`/`--bench-index` in `main.rs`,
+  `Doc.large` (`doc::is_large`) skipped by `lsp_sync` and `git::update_gutter`.
 - `src/config.rs` – `settings.toml` (`hints = true`, `autocomplete = true`) in the config folder: load (defaults on any
   problem, field by field), save one key.
 - `src/mackeys.rs` – macOS keys terminals mangle (decision 0010): Cmd chords with SUPER → Ctrl twins
@@ -245,6 +257,7 @@ used where the real key works shows "Tip: key" at its top for 3 s.
 | Alt+F1 | reveal the current file in the tree |
 | Ctrl+Shift+N, **Ctrl+P** | Go to File: type to fuzzy-filter, `name:42` jumps to line 42, ↑↓, Enter |
 | Ctrl+Shift+F, **Alt+F** | Find in Files (selection pre-fills it; smart case), Enter opens at the match, selected |
+| Ctrl+T, then Tab | Search Everywhere tabs: All → Files → **Symbols** → Text (SYMBOLS section from the code index; Enter opens at the name) |
 | Ctrl+E | Recent Files (previous file preselected, type to filter) |
 | **Ctrl+T** (also Alt+S, Alt+Space; Option+Space on a Mac) | Search Everywhere: file names (FILES) and contents (TEXT) at once; Tab / Shift+Tab = All / Files / Text; `name:42` works; Enter opens at the match; Alt+F1 shows the row in the tree; from the focused tree it searches the selected folder (Backspace on an empty input widens) |
 | typing in the focused tree | speed search: jumps to the best matching name (closed folders too, via the index), ↑↓ next/previous match, Backspace, Esc clears |
@@ -276,7 +289,7 @@ paths show as `repo › path`, and the status bar starts with the current repo (
 | Ctrl+Alt+B | go to implementation(s) (one jumps, several → a list) |
 | Alt+F7 | find usages: list of `line text … file:line`, type to filter, Enter opens |
 | Ctrl+F12 | file structure (document symbols, nested), the symbol at the cursor preselected, type to filter |
-| Ctrl+Alt+Shift+N, **Alt+N** | go to symbol in the project (workspace symbols; starts with the word at the cursor, the server filters) |
+| Ctrl+Alt+Shift+N, **Alt+N** | go to symbol in the project: the code index's symbols at once (no server needed), plus the server's workspace symbols when one runs (server rows first); starts with the word at the cursor |
 | F2 / Shift+F2 | next / previous error or warning in the file (wraps; infos when there are none), "3/7 message" in the status bar |
 | Alt+6 | the file's problems as a list (IDEA's Problems window) |
 | in the lists | ↑↓ PgUp PgDn, Ctrl+Home/End, typing filters, Backspace / Ctrl+Backspace / Ctrl+U, Enter or F4 open, Esc close |
@@ -371,6 +384,14 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 - Register: the editor clipboard (`y`/`d`/`p` and Ctrl+C/Ctrl+V share it); only `y` also copies to the system
   clipboard (so `x`/`dd` don't overwrite it).
 - `:q` closes the tab (the last tab quits); `:qa` quits; both refuse unsaved work without `!` (E37).
+
+## Code index (decision 0014)
+- Cache: `$CATLAS_CACHE_DIR`, else `~/Library/Caches/code-atlas` (Mac) / `$XDG_CACHE_HOME/code-atlas`;
+  `catlas --index-status [dir]` shows it, `catlas --bench-index <dir> [--files N]` measures (empty dir = synthetic
+  repo; real folders are only read). Settings: `large_file_mb = 20`, `[index] enabled max_file_kb max_files
+  symbols watch memory_mb`. Deleting the cache folder is always safe (it rebuilds).
+- Tests: unit tests build their own `Index` with scratch caches (`from_settings` is `None` under `cfg(test)`);
+  e2e sets `CATLAS_CACHE_DIR=$SCRATCH/bin/.catlas-cache` (`$CACHE`), see `scenarios/index.sh`.
 
 ## Gotchas
 - Terminals without the kitty protocol can't send Ctrl+Shift+letter, Ctrl+/ arrives as Ctrl+7 or Ctrl+_,
@@ -470,6 +491,7 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 ## Decisions
 `docs/decisions/0015-mission-control.md` – mission control: agents in their own worktrees (`<repo>-wt/<slug>`, acceptEdits there, never bypass), cards with activity / cost / tokens / changes / sparkline, land = commit leftovers + ff / merge / rebase behind a question (never push or force; conflicts aborted), remove refuses dirty, discard after a question, ask-an-agent from the code (Ctrl+U), presence markers + ticker, OSC 9 / bell, 5 hint contexts, one repo per agent.
 `docs/decisions/0013-workspaces.md` – workspaces: several roots (`label › path`), opening rules (folders, `*.catlas.toml`, `.code-atlas/workspace.toml`, folder of repos, `--single`), `@repo` scoping, multi-root tree + badges, background status of every repo, current repo follows the editor, Repos popup (Alt+O), fetch/pull all behind a question, recent workspaces (`-w`), LSP per root unchanged.
+`docs/decisions/0014-big-codebases.md` – persistent trigram index + tree-sitter symbols per root (multi-root API), log-structured segments in the cache, mtime/size scan + `notify` watcher, verified + ranked results, SYMBOLS / Alt+N without LSP, large-file mode, benchmark table.
 `docs/decisions/0012-git-view.md` – Git view: review of working tree / agent run / commit as one live document (1 s refresh, fingerprint), Ctrl+L / Alt+8, single-letter keys, hunk stage/unstage via `git apply --cached`, partial commits from the index, revert with confirm + byte-level undo, run snapshots (temp index, user's index untouched) + Ctrl+D, log with own lane graph and ✳ for Claude commits, blame with `--contents -`, branches popup, push/pull/fetch behind a question.
 `docs/decisions/0011-autocomplete.md` – completion as you type (100 ms pause, server trigger characters, not in comments/strings/prose, newest answer only), Ctrl+J / Ctrl+@ next to Ctrl+Space (macOS takes it), Enter on a typed-out word = new line, word completion from open buffers (alone or under few server items), `autocomplete` setting.
 `docs/decisions/0010-mac-undo-and-xml.md` – Cmd+Z/Cmd chords via SUPER (editor only), Ω-after-undo redo, Alt+Shift+Z, "Nothing to undo", no-op edits make no undo step, XML/DTD highlighting (tree-sitter-xml), per-line `<!-- -->` comments, lemminx entry.
@@ -504,6 +526,11 @@ Tests: unit `src/workspace/tests.rs` (paths, opening, files, recent, excludes, t
 + fetch against a local bare repo, plans) and 4 binding-test contexts (309 unit), e2e
 `scenarios/workspaces.sh` (6 scenarios, 69 in all). Not done: loose folders of a folder-of-repos, per-repo
 agents/terminal (track C), persistent index (track B), commit/push across repos.
+Huge codebases done 2026-10-31 (big-index, decision 0014, see Code index): persistent index per root in the
+cache (trigrams + symbols, built in the background, warm start 260 ms on 200 000 files, find in files 12 ms
+p50 instead of 3.5 s), files follow the disk (watcher), ranked TEXT rows, SYMBOLS section + Symbols tab,
+Alt+N without a server, large-file mode, `--index-status`, `--bench-index`. Tests: 318 unit, e2e 68 (+5 in
+`scenarios/index.sh`). Not done: regex over the index, symbol references, git-recency ranking.
 Git view done 2026-10-26 (git-view, decision 0012, see Keys (git view)): Ctrl+L / Alt+8 opens a view over the
 editor with **Changes** (one live document of every change: unstaged, untracked, staged; syntax colours, word
 highlights, side by side from 150 columns, file list left or on top at 80 columns; refreshes every second while

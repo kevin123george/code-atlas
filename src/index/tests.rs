@@ -407,39 +407,3 @@ fn fuzzy_prefilter_agrees_with_the_scorer() {
     }
 }
 
-#[test]
-#[ignore]
-fn zz_profile() {
-    let d = scratch("prof");
-    fs::create_dir_all(d.join("flat")).unwrap();
-    for i in 0..100_000 {
-        fs::write(d.join(format!("flat/f{i:06}.txt")), "").unwrap();
-    }
-    let t = Instant::now();
-    let n = fs::read_dir(d.join("flat")).unwrap().count();
-    eprintln!("read_dir {n}: {:?}", t.elapsed());
-    let t = Instant::now();
-    let l = crate::project::tree::list_dir(&d.join("flat"));
-    eprintln!("list_dir {}: {:?}", l.len(), t.elapsed());
-    let t = Instant::now();
-    let mut tree = crate::project::tree::Tree::new(&d);
-    tree.expand(1);
-    eprintln!("expand: {:?}", t.elapsed());
-    let p = d.join("huge.rs");
-    fs::write(&p, "fn a() { let x = 1; } // c\n".repeat(1_500_000)).unwrap();
-    let mut app = crate::app::App::new(vec![p]).unwrap();
-    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 50)).unwrap();
-    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
-    for _ in 0..3 {
-        let t = Instant::now();
-        app.handle(crossterm::event::Event::Key(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('x'), crossterm::event::KeyModifiers::NONE)));
-        let a = t.elapsed();
-        app.tick();
-        let b = t.elapsed();
-        term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
-        let c = t.elapsed();
-        app.lsp_tick();
-        eprintln!("key {a:?} tick {b:?} draw {c:?} lsp {:?}", t.elapsed());
-    }
-    fs::remove_dir_all(d).unwrap();
-}

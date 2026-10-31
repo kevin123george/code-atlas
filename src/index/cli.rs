@@ -19,6 +19,7 @@ use super::{cache_dir, FindOpts, Index};
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
+        Some("--bench-warm") if args.len() >= 3 => warm(Path::new(&args[1]), Path::new(&args[2])),
         Some("--index-status") => {
             let dir = args.get(1).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
             status(&dir);
@@ -239,6 +240,46 @@ pub fn generate(dir: &Path, n: usize) -> std::io::Result<u64> {
     Ok(total.into_inner())
 }
 
+/// The warm half of the bench (its own process): load the cache, check the disk, query.
+fn warm(root: &Path, cache: &Path) -> anyhow::Result<()> {
+    let rss0 = rss();
+    let cfg = root::Config { watch: false, ..super::config_from(&crate::config::Settings::get().index) };
+    let t = Instant::now();
+    let idx = Index::new(cfg, cache.to_path_buf());
+    let r = idx.add_root(root);
+    while !r.view().content_ready {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let loaded = t.elapsed();
+    let rss_loaded = rss();
+    let mut lat = Vec::new();
+    for q in ["needle_marker_7", "return", "kalo"] {
+        let (_, a, _) = run_find(idx.find(root, None, q.into(), FindOpts::default()).expect("ready"));
+        lat.push(format!("{q} {a:.0} ms"));
+    }
+    idx.wait_idle(Duration::from_secs(600));
+    let checked = t.elapsed();
+    println!("| warm start (new process): index loaded, searchable | {} ms |", loaded.as_millis());
+    println!("| warm start: first queries (cold page cache) | {} |", lat.join(", "));
+    println!("| warm start: disk check done (mtime + size of every file) | {} ms |", checked.as_millis());
+    println!("| memory (RSS) after warm start | {} loaded, {} after queries + disk check (process before: {}) |", mb(rss_loaded), mb(rss()), mb(rss0));
+    Ok(())
+}
+
+fn incremental(idx: &Index, r: &std::sync::Arc<super::Root>, root: &Path, files: &[String]) -> anyhow::Result<()> {
+    let changed: Vec<PathBuf> = files.iter().step_by((files.len() / 10).max(1)).take(10).map(|f| root.join(f)).collect();
+    let t = Instant::now();
+    for (k, p) in changed.iter().enumerate() {
+        let mut f = fs::OpenOptions::new().append(true).open(p)?;
+        writeln!(f, "// fresh_edit_token_{k}")?;
+    }
+    r.changed(changed.clone());
+    idx.wait_idle(Duration::from_secs(60));
+    let (_, _, got) = run_find(idx.find(&root, None, "fresh_edit_token_".into(), FindOpts::default()).expect("ready"));
+    println!("| {} | {} |", "incremental: 10 edited files → searchable", format!("{} ms (found {got} of 10)", t.elapsed().as_millis()));
+    Ok(())
+}
+
 fn pct(v: &mut [f64], p: f64) -> f64 {
     if v.is_empty() {
         return 0.0;
@@ -327,9 +368,11 @@ pub fn bench(dir: &Path, n: usize, keep: bool) -> anyhow::Result<()> {
     }
 
     // Queries.
+    // Identifiers that exist: every n-th symbol name of the index.
     let words: Vec<String> = {
-        let mut rr = Rng(42);
-        (0..20).map(|_| camel(&mut rr)).collect()
+        let seg = &v.segs[0];
+        let step = (seg.syms.len() / 20).max(1);
+        seg.syms.iter().step_by(step).take(20).map(|s| seg.sym_name(s).to_string()).collect()
     };
     let lat = |label: &str, qs: &[String], per_line: bool| {
         let mut firsts = Vec::new();
@@ -388,35 +431,19 @@ pub fn bench(dir: &Path, n: usize, keep: bool) -> anyhow::Result<()> {
     }
     row("symbols (Search Everywhere / Alt+N)", format!("p50 {:.1} ms / p95 {:.1} ms ({:.0} results avg, top 40)", pct(&mut st.clone(), 0.5), pct(&mut st, 0.95), sh as f64 / 13.0));
 
-    // Incremental: change files, see them in a query.
-    let changed: Vec<PathBuf> = files.iter().step_by((files.len() / 10).max(1)).take(10).map(|f| root.join(f)).collect();
-    let t = Instant::now();
-    for (k, p) in changed.iter().enumerate() {
-        let mut f = fs::OpenOptions::new().append(true).open(p)?;
-        writeln!(f, "// fresh_edit_token_{k}")?;
+    // Incremental: change files, see them in a query (only in a generated repo: a real folder
+    // is never written to).
+    if generated {
+        incremental(&idx, &r, &root, &files)?;
     }
-    r.changed(changed.clone());
-    idx.wait_idle(Duration::from_secs(60));
-    let (_, _, got) = run_find(idx.find(&root, None, "fresh_edit_token_".into(), FindOpts::default()).expect("ready"));
-    row("incremental: 10 edited files → searchable", format!("{} ms (found {got} of 10)", t.elapsed().as_millis()));
     drop(r);
     drop(idx);
     std::thread::sleep(Duration::from_millis(100));
 
-    // Warm start.
-    let t = Instant::now();
-    let idx = Index::new(cfg, cache.clone());
-    let r = idx.add_root(&root);
-    while !r.view().content_ready {
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    let loaded = t.elapsed();
-    idx.wait_idle(Duration::from_secs(600));
-    row("warm start: index loaded, searchable", format!("{} ms", loaded.as_millis()));
-    row("warm start: disk check done (mtime + size)", format!("{} ms", t.elapsed().as_millis()));
-    row("memory (RSS) after warm start", mb(rss()));
-    drop(r);
-    drop(idx);
+    // Warm start, in a fresh process (honest memory numbers).
+    let _ = cfg;
+    let out = std::process::Command::new(std::env::current_exe()?).arg("--bench-warm").arg(&root).arg(&cache).output()?;
+    print!("{}", String::from_utf8_lossy(&out.stdout));
 
     // A folder with 100 000 entries in the tree.
     let big = scratch.join("bigdir");
@@ -430,7 +457,8 @@ pub fn bench(dir: &Path, n: usize, keep: bool) -> anyhow::Result<()> {
     row("tree: expand a folder of 100 000 files", format!("{} ms ({} rows)", t.elapsed().as_millis(), tree.rows.len()));
 
     // A large file in the editor.
-    let huge = scratch.join("huge.rs");
+    fs::create_dir_all(scratch.join("huge"))?;
+    let huge = scratch.join("huge/huge.rs");
     {
         let mut w = std::io::BufWriter::new(fs::File::create(&huge)?);
         let mut rr = Rng(7);
