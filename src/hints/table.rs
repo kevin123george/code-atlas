@@ -244,7 +244,7 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
             h("a-z", "names + text · :42"),
             h("↑/↓", "pick · tree follows"),
             h("Enter", "open"),
-            h("Tab/Shift+Tab", "all / files / symbols / text"),
+            h("Tab/Shift+Tab", "next / previous tab"),
             h("Alt+F1", "show in tree"),
             h("Ctrl+U", "clear"),
             h("Esc", "close"),
