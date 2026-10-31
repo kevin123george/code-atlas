@@ -529,8 +529,9 @@ agents/terminal (track C), persistent index (track B), commit/push across repos.
 Huge codebases done 2026-10-31 (big-index, decision 0014, see Code index): persistent index per root in the
 cache (trigrams + symbols, built in the background, warm start 260 ms on 200 000 files, find in files 12 ms
 p50 instead of 3.5 s), files follow the disk (watcher), ranked TEXT rows, SYMBOLS section + Symbols tab,
-Alt+N without a server, large-file mode, `--index-status`, `--bench-index`. Tests: 318 unit, e2e 68 (+5 in
-`scenarios/index.sh`). Not done: regex over the index, symbol references, git-recency ranking.
+Alt+N without a server, large-file mode, `--index-status`, `--bench-index`. Workspaces: one index root per repository
+(`Project::with_index`, `set_workspace` adds/removes roots, `Index::find_multi`, `@repo` scope). Tests: 349 unit, e2e 77
+(+5 in `scenarios/index.sh`). Not done: regex over the index, symbol references, git-recency ranking.
 Git view done 2026-10-26 (git-view, decision 0012, see Keys (git view)): Ctrl+L / Alt+8 opens a view over the
 editor with **Changes** (one live document of every change: unstaged, untracked, staged; syntax colours, word
 highlights, side by side from 150 columns, file list left or on top at 80 columns; refreshes every second while

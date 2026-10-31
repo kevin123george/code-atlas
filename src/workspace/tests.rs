@@ -196,7 +196,7 @@ fn finder_and_find_in_files_span_every_root() {
     let home = two_repos();
     let mut p = Project::with_workspace(ws_of(&home), true);
     ready(&mut p);
-    let mut files = p.files.clone();
+    let mut files = (*p.files).clone();
     files.sort();
     assert_eq!(files, ["alpha/README.md", "alpha/src/main.rs", "beta/README.md", "beta/lib/util.rs"]);
     let typ = |p: &mut Project, s: &str| {

@@ -69,6 +69,9 @@ gutter compared the whole rope every tick.
   instead of whole ropes every tick. The tree sorts folder listings with cached lowercase keys (100 000
   entries: 76–91 ms, rows are already drawn virtually). The fuzzy scorer rejects non-matching ASCII paths
   before allocating.
+- **Workspaces (0013):** the project adds one index root per repository and drops it when the repository
+  leaves the workspace (`set_workspace`); the file list is the roots' lists with `label/` in front; find in
+  files over all roots (`Index::find_multi`) or one (`@repo`, a scope folder); symbols over all roots.
 - **Settings** (`settings.toml`): `large_file_mb = 20`, `[index]` `enabled`, `max_file_kb`, `max_files`,
   `symbols`, `watch`, `memory_mb`. **CLI:** `catlas --index-status [dir]` (cache folder, files, symbols, size,
   age, what changed since, all cached roots; read only), `catlas --bench-index <dir> [--files N] [--keep]`.

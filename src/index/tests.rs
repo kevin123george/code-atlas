@@ -407,3 +407,52 @@ fn fuzzy_prefilter_agrees_with_the_scorer() {
     }
 }
 
+
+#[test]
+fn a_workspace_of_several_repos_uses_the_index() {
+    use crate::project::{PopupKind, Project};
+    use crate::workspace::Workspace;
+    let home = scratch("ws");
+    let cache = scratch("ws-cache");
+    for (repo, body) in [("alpha", "fn in_alpha() { shared_word }\n"), ("beta", "fn in_beta() { shared_word }\n")] {
+        fs::create_dir_all(home.join(repo).join("src")).unwrap();
+        fs::write(home.join(repo).join("src/lib.rs"), body).unwrap();
+    }
+    let ws = Workspace::from_dirs(None, home.clone(), vec![(home.join("alpha"), None, None), (home.join("beta"), None, None)]);
+    let idx = Index::new(cfg(), cache.clone());
+    let mut p = Project::with_index(ws, true, Some(idx.clone()));
+    assert!(idx.wait_idle(Duration::from_secs(30)));
+    assert_eq!(idx.roots().len(), 2, "one index root per repository");
+    p.poll();
+    assert_eq!(*p.files, vec!["alpha/src/lib.rs".to_string(), "beta/src/lib.rs".to_string()]);
+    p.open_popup(PopupKind::Search, Some("shared_word".into()));
+    let t = Instant::now();
+    while p.searching() || p.hits.len() < 2 {
+        p.poll();
+        assert!(t.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let paths: BTreeSet<&str> = p.hits.iter().map(|h| h.path.as_str()).collect();
+    assert_eq!(paths, ["alpha/src/lib.rs", "beta/src/lib.rs"].into_iter().collect());
+    assert_eq!(p.popup_target().unwrap().path.parent().unwrap().parent().unwrap().file_name().unwrap(), paths.iter().next().unwrap().split('/').next().unwrap());
+    // `@beta` scopes to one repository.
+    p.close_popup();
+    p.open_popup(PopupKind::Search, Some("@beta shared_word".into()));
+    let t = Instant::now();
+    while p.searching() || p.hits.is_empty() {
+        p.poll();
+        assert!(t.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(p.hits.iter().all(|h| h.path == "beta/src/lib.rs"), "{:?}", p.hits);
+    // Removing a repository removes its index root.
+    p.close_popup();
+    p.set_workspace(Workspace::single(home.join("alpha")));
+    assert_eq!(idx.roots(), vec![crate::project::canonical(&home.join("alpha"))]);
+    assert!(idx.wait_idle(Duration::from_secs(30)));
+    p.poll();
+    assert_eq!(*p.files, vec!["src/lib.rs".to_string()]);
+    drop(p);
+    fs::remove_dir_all(home).unwrap();
+    fs::remove_dir_all(cache).unwrap();
+}
