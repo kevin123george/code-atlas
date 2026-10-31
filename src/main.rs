@@ -48,7 +48,7 @@ fn main() -> Result<()> {
         lsp::health::run(&dir);
         return Ok(());
     }
-    if args.first().is_some_and(|a| a == "--index-status" || a == "--bench-index") {
+    if args.first().is_some_and(|a| a == "--index-status" || a == "--bench-index" || a == "--bench-warm") {
         return index::cli::run(&args);
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {

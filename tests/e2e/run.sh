@@ -58,7 +58,8 @@ start() {
     CFG="$SCRATCH/bin/.catlas-config"
     mkdir -p "$CFG"
     [ -n "${E2E_HINTS:-}" ] || [ -f "$CFG/settings.toml" ] || printf 'hints = false\n' > "$CFG/settings.toml"
-    local cmd="cd '$SCRATCH' && CATLAS_CONFIG_DIR='$CFG' PATH='$SCRATCH/bin:$PATH' exec '$CATLAS'"
+    CACHE="$SCRATCH/bin/.catlas-cache"   # the code index's cache (never ~/Library/Caches)
+    local cmd="cd '$SCRATCH' && CATLAS_CONFIG_DIR='$CFG' CATLAS_CACHE_DIR='$CACHE' PATH='$SCRATCH/bin:$PATH' exec '$CATLAS'"
     local f; for f in "$@"; do cmd="$cmd '$f'"; done
     tm new-session -d -s "$SESSION" -x "$cols" -y "$rows" "$cmd" || fail "tmux new-session failed"
     tm set -t "$SESSION" status off >/dev/null 2>&1

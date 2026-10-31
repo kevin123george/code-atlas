@@ -34,6 +34,7 @@ t_quick_text_tab_opens_at_match() {
     wait_for "src/alpha.rs:2  let beta = 1"
     key Tab                                  # Files tab: no text rows
     wait_gone "src/alpha.rs:2"
+    key Tab                                  # Symbols tab (code index)
     key Tab                                  # Text tab
     wait_for "src/alpha.rs:2"
     key Enter
