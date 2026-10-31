@@ -53,7 +53,11 @@ fn status_color(s: Status) -> Color {
 pub fn draw(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
     let focused = app.git_view_focused();
     let running = app.agents.running_count();
-    let branch = app.dock.git.branch.clone();
+    // `repo ⎇ branch` with several workspace roots (decision 0013).
+    let branch = app.dock.git.branch.clone().map(|b| match &app.dock.git.label {
+        Some(l) => format!("{l} ⎇ {b}"),
+        None => format!("⎇ {b}"),
+    });
     let v = &mut app.git_view;
     if !v.open {
         v.rect = Rect::default();
@@ -104,7 +108,7 @@ fn title_bar(buf: &mut Buffer, v: &GitView, r: Rect, focused: bool, branch: Opti
         x += 1;
     }
     if let Some(b) = branch {
-        x = put(buf, x, r.y, &format!("⎇ {b} "), r.right().saturating_sub(x), Style::new().fg(TEXT_2).bg(SURFACE_1));
+        x = put(buf, x, r.y, &format!("{b} "), r.right().saturating_sub(x), Style::new().fg(TEXT_2).bg(SURFACE_1));
     }
     // Right side: what is shown, live state.
     let mut right: Vec<(String, Style)> = Vec::new();
@@ -189,7 +193,7 @@ fn footer(buf: &mut Buffer, v: &GitView, r: Rect) -> Option<Position> {
     }
     let wide = r.width >= 120;
     let keys: &[(&str, &str)] = match v.tab {
-        Tab::Changes if wide => &[("F7", "change"), ("Tab", "file"), ("s", "stage"), ("r/R", "revert hunk/file"), ("u", "undo"), ("v", "split"), ("a", "agent runs"), ("t", "agent's files"), ("Enter", "open"), ("b", "blame"), ("h", "history"), ("2", "log"), ("B", "branches"), ("P/U/F", "push/pull/fetch"), ("Esc", "close")],
+        Tab::Changes if wide => &[("F7", "change"), ("Tab", "file"), ("s", "stage"), ("r/R", "revert hunk/file"), ("u", "undo"), ("v", "split"), ("a", "agent runs"), ("t", "agent's files"), ("Enter", "open"), ("b", "blame"), ("h", "history"), ("2", "log"), ("B", "branches"), ("P/U/F", "push/pull/fetch"), ("o", "repos"), ("Esc", "close")],
         Tab::Changes => &[("F7", "change"), ("Tab", "file"), ("s", "stage"), ("r", "revert"), ("u", "undo"), ("a", "runs"), ("2", "log"), ("Esc", "")],
         Tab::Log if v.details.is_some() => &[("F7", "change"), ("Tab", "file"), ("v", "split"), ("Enter", "open file"), ("y", "copy hash"), ("Esc", "back")],
         Tab::Log if wide => &[("Enter", "details"), ("/", "filter"), ("h", "this file's history"), ("y", "copy hash"), ("1", "changes"), ("B", "branches"), ("P/U/F", "push/pull/fetch"), ("Esc", "close")],

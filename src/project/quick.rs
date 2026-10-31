@@ -164,9 +164,9 @@ impl Project {
             Item::File(i) => {
                 let m = self.matches.get(i)?;
                 let at = split_line_suffix(p.input.trim()).1.map(|(l, c)| (l.saturating_sub(1), c.saturating_sub(1), 0));
-                Some(Target { path: self.root.join(&m.path), at })
+                Some(Target { path: self.abs(&m.path), at })
             }
-            Item::Hit(i) => Some(hit_target(&self.root, self.hits.get(i)?)),
+            Item::Hit(i) => Some(hit_target(&self.ws, self.hits.get(i)?)),
         }
     }
 
@@ -226,7 +226,7 @@ impl Project {
         let want: Option<PathBuf> = self.popup_target().map(|t| t.path).or_else(|| {
             // Nothing selected: show the scope folder, if any.
             let scoped = self.popup.as_ref().is_some_and(|p| p.kind == PopupKind::Quick);
-            self.quick.scope.as_ref().filter(|_| scoped).map(|s| self.root.join(s))
+            self.quick.scope.as_ref().filter(|_| scoped).map(|s| self.abs(s))
         });
         if want == self.followed {
             return;
@@ -273,15 +273,15 @@ impl Project {
         }
         let q = self.tree.speed.clone();
         if let Some(f) = best_by_name(&q, self.files.iter()).cloned() {
-            let path = self.root.join(f);
+            let path = self.abs(&f);
             self.tree.reveal(&path);
         }
     }
 }
 
 /// Where a content hit opens: its line and column, with the match selected.
-pub fn hit_target(root: &Path, h: &Hit) -> Target {
-    Target { path: root.join(&h.path), at: Some((h.line, h.start, h.end - h.start)) }
+pub fn hit_target(ws: &crate::workspace::Workspace, h: &Hit) -> Target {
+    Target { path: ws.abs(&h.path), at: Some((h.line, h.start, h.end - h.start)) }
 }
 
 #[cfg(test)]

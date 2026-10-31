@@ -77,11 +77,16 @@ pub enum Ctx {
     GitConfirm,
     GitInput,
     Blame,
+    /// The Repos popup (Ctrl+O, decision 0013) and its modes.
+    Repos,
+    ReposInput,
+    ReposConfirm,
+    Workspaces,
 }
 
 /// Every context (tests walk them all).
 #[cfg(test)]
-pub const ALL: [Ctx; 29] = [
+pub const ALL: [Ctx; 33] = [
     Ctx::Idea,
     Ctx::Selection,
     Ctx::VimNormal,
@@ -111,6 +116,10 @@ pub const ALL: [Ctx; 29] = [
     Ctx::GitConfirm,
     Ctx::GitInput,
     Ctx::Blame,
+    Ctx::Repos,
+    Ctx::ReposInput,
+    Ctx::ReposConfirm,
+    Ctx::Workspaces,
 ];
 
 const GOTO_FILE: Hint = fb("Ctrl+Shift+N", "Ctrl+P", "go to file");
@@ -128,6 +137,8 @@ const UNDO_REDO: Hint = fb("Ctrl+(Shift+)Z", "Ctrl+Z/Alt+Z", "undo / redo");
 const COMPLETE: Hint = h("Ctrl+Space/J", "complete");
 /// The Git view (decision 0012): Ctrl+L reaches every terminal; Alt+8 too where Option is Meta.
 const GIT_VIEW: Hint = h("Ctrl+L", "git review / log");
+/// The Repos popup (decision 0013): Ctrl+O reaches every terminal and nothing else used it.
+const REPOS: Hint = h("Ctrl+O", "repos (workspace)");
 
 /// The panel title for a context (some add a detail, see `super::title`).
 pub fn title(c: Ctx) -> &'static str {
@@ -161,6 +172,10 @@ pub fn title(c: Ctx) -> &'static str {
         Ctx::GitConfirm => "git · confirm",
         Ctx::GitInput => "git · input",
         Ctx::Blame => "editor · blame",
+        Ctx::Repos => "repos",
+        Ctx::ReposInput => "repos · input",
+        Ctx::ReposConfirm => "repos · confirm",
+        Ctx::Workspaces => "recent workspaces",
     }
 }
 
@@ -221,9 +236,9 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
             h("Enter", "open"),
             h("a-z", "speed search"),
             h("Ctrl+T", "search in folder"),
+            h("-", "collapse all"),
+            REPOS,
             h("Esc", "editor"),
-            h("Alt+1", "hide tree"),
-            GOTO_FILE,
         ] },
         Ctx::TreeSearch => const { &[
             h("a-z", "narrow"),
@@ -365,6 +380,19 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
         ] },
         Ctx::GitConfirm => const { &[h("y/Enter", "yes, do it"), h("n/Esc", "no")] },
         Ctx::GitInput => const { &[h("a-z", "type"), h("Enter", "apply"), h("Backspace", "delete"), h("Esc", "done")] },
+        Ctx::Repos => const { &[
+            h("Enter", "make it the current repo"),
+            h("g/l/c", "its changes / log / commit"),
+            h("F/U", "fetch / pull all (asks)"),
+            h("/", "filter by name"),
+            h("a", "add a folder as a root"),
+            h("d", "remove from workspace"),
+            h("w", "recent workspaces"),
+            h("Esc", "close"),
+        ] },
+        Ctx::ReposInput => const { &[h("a-z", "type"), h("Enter", "apply"), h("Backspace", "delete"), h("Ctrl+U", "clear"), h("Esc", "cancel")] },
+        Ctx::ReposConfirm => const { &[h("y/Enter", "yes, do it"), h("n/Esc", "no")] },
+        Ctx::Workspaces => const { &[h("↑/↓", "select"), h("Enter", "open it"), h("Esc", "back to repos")] },
         Ctx::Blame => const { &[
             h("Ctrl+L", "this line's commit"),
             GOTO_FILE,
