@@ -128,6 +128,10 @@ impl App {
             undo_chain: false,
         };
         app.workspace_init();
+        // A file opened from the command line in large-file mode says so (decision 0014).
+        if let Some(n) = app.docs.iter().find_map(|d| d.large_note()) {
+            app.message = Some(n);
+        }
         Ok(app)
     }
 

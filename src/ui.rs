@@ -215,7 +215,13 @@ fn draw_text(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
         let start = d.line_start(line);
         let len = d.line_len(line);
         let mut col = 0usize;
+        let mut cut = false;
         for (i, c) in d.rope.line(line).chars().take(len).enumerate() {
+            // Past the right edge: stop (a 200 000-char line would cost that much per frame).
+            if col >= d.scroll_col + text_w {
+                cut = true;
+                break;
+            }
             let w = char_width(c, col);
             let pos = start + i;
             let selected = sel.is_some_and(|(s, e)| pos >= s && pos < e);
@@ -246,7 +252,7 @@ fn draw_text(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
             col += w;
         }
         // Show a selected line break as one selected cell.
-        if sel.is_some_and(|(s, e)| start + len >= s && start + len < e && line + 1 < total) {
+        if !cut && sel.is_some_and(|(s, e)| start + len >= s && start + len < e && line + 1 < total) {
             let vc = col;
             if vc >= d.scroll_col && vc < d.scroll_col + text_w {
                 buf[(text_x + (vc - d.scroll_col) as u16, y)].set_bg(SELECTION);
@@ -298,6 +304,7 @@ fn draw_status(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> 
     }
     let rw = rw + crate::git::ui::draw_branch(buf, &app.dock.git, area, rw);
     let rw = rw + crate::mission::ui::draw_ticker(buf, app, area, rw);
+    let rw = rw + crate::index::ui::draw_status(buf, app, area, rw);
     if let Some(p) = &app.prompt {
         let label = format!(" {}: ", p.kind.label());
         buf.set_string(area.x, area.y, &label, Style::new().fg(ACCENT).bg(SURFACE_2).add_modifier(Modifier::BOLD));

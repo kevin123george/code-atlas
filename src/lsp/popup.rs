@@ -177,11 +177,15 @@ pub struct Picker {
     /// Workspace symbols: the server asked, and the number of the newest request.
     pub server: usize,
     pub seq: u64,
+    /// Workspace symbols: the server's answer and the code index's (decision 0014), merged
+    /// into `items` (server first, index rows at places the server didn't name).
+    pub lsp_items: Vec<PickItem>,
+    pub idx_items: Vec<PickItem>,
 }
 
 impl Picker {
     pub fn new(kind: PickKind, title: String, items: Vec<PickItem>) -> Picker {
-        let mut p = Picker { kind, title, query: String::new(), shown: Vec::new(), items, sel: 0, server: 0, seq: 0 };
+        let mut p = Picker { kind, title, query: String::new(), shown: Vec::new(), items, sel: 0, server: 0, seq: 0, lsp_items: Vec::new(), idx_items: Vec::new() };
         p.refilter();
         p
     }
@@ -197,6 +201,22 @@ impl Picker {
             self.shown.sort_by_key(|&i| !self.items[i].label.to_lowercase().contains(&lower));
         }
         self.sel = self.sel.min(self.shown.len().saturating_sub(1));
+    }
+
+    /// Workspace symbols: `items` = the server's rows, then the index's that aren't among them
+    /// (same file and line). The selection stays on its row when one is added below it.
+    pub fn merge(&mut self) {
+        let keep = self.selected().map(|it| (it.path.clone(), it.pos.line));
+        let mut items = self.lsp_items.clone();
+        for it in &self.idx_items {
+            if !self.lsp_items.iter().any(|l| l.path == it.path && l.pos.line == it.pos.line) {
+                items.push(it.clone());
+            }
+        }
+        items.truncate(500);
+        self.items = items;
+        self.refilter();
+        self.sel = keep.and_then(|(p, l)| self.shown.iter().position(|&i| self.items[i].path == p && self.items[i].pos.line == l)).unwrap_or(0);
     }
 
     pub fn selected(&self) -> Option<&PickItem> {

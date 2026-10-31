@@ -21,7 +21,6 @@ use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ropey::Rope;
 
 use crate::doc::Doc;
 use diff::{DiffLine, LineKind, Mark};
@@ -140,8 +139,9 @@ fn read_head(root: &Path, rel: &str) -> Option<Arc<str>> {
 #[derive(Default)]
 struct Gutter {
     marks: Vec<Option<Mark>>,
-    /// The text the marks (or the running job) were computed from.
-    snapshot: Option<Rope>,
+    /// Revision and length of the text the marks (or the running job) were computed from
+    /// (comparing whole ropes every tick was O(file size), decision 0014).
+    snapshot: Option<(u64, usize)>,
     job: Option<Receiver<Vec<Option<Mark>>>>,
 }
 
@@ -390,7 +390,8 @@ impl Git {
 
     fn update_gutter(&mut self, d: &Doc) {
         let Some(path) = d.path.clone() else { return };
-        if self.root.is_none() {
+        // Large files (decision 0014): no gutter diff.
+        if self.root.is_none() || d.large {
             return;
         }
         let abs = self.canon.entry(path.clone()).or_insert_with(|| crate::project::canonical(&path)).clone();
@@ -417,11 +418,12 @@ impl Git {
                 Err(_) => g.job = None,
             }
         }
-        if g.snapshot.as_ref().is_some_and(|s| *s == d.rope) {
+        let stamp = (d.rev(), d.rope.len_chars());
+        if g.snapshot == Some(stamp) {
             return;
         }
         let rope = d.rope.clone();
-        g.snapshot = Some(rope.clone());
+        g.snapshot = Some(stamp);
         match base {
             None => {
                 self.changed |= !g.marks.is_empty();

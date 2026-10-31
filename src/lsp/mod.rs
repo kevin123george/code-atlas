@@ -105,6 +105,8 @@ pub struct Lsp {
     comp_seq: u64,
     /// (doc, word start) whose popup was closed with Esc: it doesn't open by itself again.
     auto_off: Option<(usize, usize)>,
+    /// Alt+N: the code index's symbol search for picker request `seq` (`index::glue`).
+    pub idx_syms: Option<(u64, crate::project::search::Job<Vec<crate::index::SymbolHit>>)>,
 }
 
 impl Default for Lsp {
@@ -132,6 +134,7 @@ impl Default for Lsp {
             auto_at: None,
             comp_seq: 0,
             auto_off: None,
+            idx_syms: None,
         }
     }
 }
@@ -271,6 +274,7 @@ impl App {
         }
         self.lsp_sync(None);
         changed |= self.auto_tick(Instant::now());
+        changed |= self.index_symbols_poll();
         changed
     }
 
@@ -279,7 +283,8 @@ impl App {
         let t = Instant::now();
         let mut live = HashSet::new();
         for i in 0..self.docs.len() {
-            let Some(path) = self.docs[i].path.clone() else { continue };
+            // Large files (decision 0014) aren't sent to servers: full-text sync per edit.
+            let Some(path) = self.docs[i].path.clone().filter(|_| !self.docs[i].large) else { continue };
             let lang = self.docs[i].syntax.lang;
             if !config::get().has_servers(lang.key()) || self.lsp.no_server.contains(&lang) {
                 continue;
@@ -625,9 +630,8 @@ impl App {
                     });
                 }
                 items.truncate(500);
-                p.items = items;
-                p.sel = 0;
-                p.refilter();
+                p.lsp_items = items;
+                p.merge();
             }
             Pending::PullDiags { path } => {
                 // "unchanged" reports keep what we have.
@@ -1107,10 +1111,18 @@ impl App {
     }
 
     fn open_symbols(&mut self) {
-        let Some((sid, _, _)) = self.active_server() else { return };
-        if !self.can(sid, "workspace/symbol") {
-            return;
-        }
+        // The code index answers at once, with or without a server (decision 0014).
+        let indexed = self.project.code_index.as_ref().is_some_and(|i| i.symbols_ready());
+        let before = self.message.clone();
+        let server = self.active_server().map(|s| s.0);
+        let sid = match server {
+            Some(sid) if self.can(sid, "workspace/symbol") => sid,
+            _ if indexed => {
+                self.message = before;
+                usize::MAX
+            }
+            _ => return,
+        };
         let mut p = Picker::new(PickKind::Symbols, "Go to symbol in the project".into(), Vec::new());
         p.server = sid;
         p.query = word_at(self.doc());
@@ -1127,6 +1139,7 @@ impl App {
         if let Some(s) = self.lsp.server(sid) {
             s.request("workspace/symbol", json!({ "query": query }), Pending::Symbols { seq });
         }
+        self.index_symbols_start(query, seq);
     }
 
     /// Problems of the active file: (start char, severity, message), in file order.

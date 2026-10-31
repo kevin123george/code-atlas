@@ -40,7 +40,7 @@ impl<T> Drop for Job<T> {
     }
 }
 
-fn spawn<T: Send + 'static>(work: impl FnOnce(Sender<T>, &AtomicBool) + Send + 'static) -> Job<T> {
+pub(crate) fn spawn<T: Send + 'static>(work: impl FnOnce(Sender<T>, &AtomicBool) + Send + 'static) -> Job<T> {
     let (tx, rx) = channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));

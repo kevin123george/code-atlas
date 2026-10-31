@@ -11,7 +11,9 @@ pub mod search;
 pub mod tree;
 pub mod ui;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -88,9 +90,20 @@ pub struct Project {
     /// Most recent first, absolute.
     pub recent: Vec<PathBuf>,
 
-    /// All project files (relative), filled in the background.
-    pub files: Vec<String>,
+    /// All project files (relative), from the code index or a walk in the background.
+    pub files: Arc<Vec<String>>,
     index: Option<Job<Vec<String>>>,
+    /// The persistent code index (decision 0014; `None` when it's off): file names, contents
+    /// and symbols without walking the disk. Multi-root workspaces add their roots to it.
+    pub code_index: Option<crate::index::Index>,
+    /// Generation of the index view `files` came from.
+    index_gen: u64,
+    /// Search Everywhere's SYMBOLS section (from the code index).
+    pub syms: Vec<crate::index::SymbolHit>,
+    sym_job: Option<Job<Vec<crate::index::SymbolHit>>>,
+    /// The running search walks the scope folder (paths come relative to it).
+    prefix_scope: bool,
+    hit_paths: HashSet<String>,
     /// Finder / recent rows for the current input.
     pub matches: Vec<Match>,
     matches_stale: bool,
@@ -159,17 +172,34 @@ impl Project {
     }
 
     pub fn with_workspace(ws: crate::workspace::Workspace, show_sidebar: bool) -> Self {
+        Self::with_index(ws, show_sidebar, crate::index::Index::from_settings())
+    }
+
+    /// A project over `ws` that uses `code_index` (every root is added to it) for files,
+    /// contents and symbols (decision 0014).
+    pub fn with_index(ws: crate::workspace::Workspace, show_sidebar: bool, code_index: Option<crate::index::Index>) -> Self {
+        if let Some(i) = &code_index {
+            for (_, r) in ws.prefixes() {
+                i.add_root(&r);
+            }
+        }
         let root = if ws.multi() { ws.home.clone() } else { ws.roots[0].path.clone() };
         Project {
             tree: Self::tree_of(&ws),
             index: Some(search::index_roots(ws.prefixes())),
             ws,
+            code_index,
+            index_gen: 0,
+            syms: Vec::new(),
+            sym_job: None,
+            prefix_scope: false,
+            hit_paths: HashSet::new(),
             root,
             sidebar: show_sidebar,
             focus_tree: false,
             popup: None,
             recent: Vec::new(),
-            files: Vec::new(),
+            files: Arc::new(Vec::new()),
             matches: Vec::new(),
             matches_stale: true,
             hits: Vec::new(),
@@ -215,9 +245,22 @@ impl Project {
     /// Swaps in other roots (runtime: add / remove a root, a recent workspace): a new tree and
     /// file index; popups close. `root` (agents, terminal) stays where catlas started.
     pub fn set_workspace(&mut self, ws: crate::workspace::Workspace) {
+        if let Some(i) = &self.code_index {
+            let new: Vec<PathBuf> = ws.prefixes().into_iter().map(|(_, r)| canonical(&r)).collect();
+            for (_, old) in self.ws.prefixes() {
+                if !new.contains(&canonical(&old)) {
+                    i.remove_root(&old);
+                }
+            }
+            for r in &new {
+                i.add_root(r);
+            }
+        }
+        self.index_gen = 0;
+        self.syms.clear();
         self.close_popup();
         self.tree = Self::tree_of(&ws);
-        self.files.clear();
+        self.files = Arc::new(Vec::new());
         self.index = Some(search::index_roots(ws.prefixes()));
         self.matches_stale = true;
         self.quick.scope = None;
@@ -240,19 +283,53 @@ impl Project {
         self.matches_stale = true;
     }
 
+    /// The code index's views of every root with its path prefix (`None` unless all exist).
+    pub fn index_views(&self) -> Option<Vec<(String, Arc<crate::index::View>)>> {
+        let i = self.code_index.as_ref()?;
+        self.ws.prefixes().into_iter().map(|(pre, r)| Some((pre, i.view(&canonical(&r))?))).collect()
+    }
+
     /// Drains the background jobs; called every loop turn (at least every 250 ms).
     pub fn poll(&mut self) {
+        // The code index's file list replaces the walk (and follows changes on disk).
+        if let Some(views) = self.index_views().filter(|vs| vs.iter().all(|(_, v)| v.files_ready)) {
+            let gen = views.iter().fold(0u64, |h, (_, v)| h.wrapping_mul(1_000_003).wrapping_add(v.gen));
+            if gen != self.index_gen {
+                self.index_gen = gen;
+                match views.as_slice() {
+                    [(pre, v)] if pre.is_empty() => self.files = v.files.clone(),
+                    _ => {
+                        let mut all = Vec::with_capacity(views.iter().map(|(_, v)| v.files.len()).sum());
+                        for (pre, v) in &views {
+                            all.extend(v.files.iter().map(|f| if pre.is_empty() { f.clone() } else { format!("{pre}/{f}") }));
+                        }
+                        all.sort_unstable();
+                        self.files = Arc::new(all);
+                    }
+                }
+                self.matches_stale = true;
+                self.index = None;
+            }
+        }
+        if let Some(job) = self.sym_job.take() {
+            match job.rx.try_recv() {
+                Ok(s) => self.syms = s,
+                Err(_) if !job.done() => self.sym_job = Some(job),
+                Err(_) => {}
+            }
+        }
         if let Some(job) = &self.index {
             let before = self.files.len();
+            let files = Arc::make_mut(&mut self.files);
             while let Ok(batch) = job.rx.try_recv() {
-                self.files.extend(batch);
+                files.extend(batch);
             }
             let done = job.done();
             if done {
                 while let Ok(batch) = job.rx.try_recv() {
-                    self.files.extend(batch);
+                    files.extend(batch);
                 }
-                self.files.sort_unstable();
+                files.sort_unstable();
                 self.index = None;
             }
             if self.files.len() != before || done {
@@ -279,19 +356,24 @@ impl Project {
     }
 
     fn push_hits(&mut self, mut batch: Vec<Hit>) {
-        // A scoped search walks the folder: paths come relative to it.
-        if let Some(s) = &self.search_scope {
+        // A scoped walk of the folder gives paths relative to it.
+        if let (Some(s), true) = (&self.search_scope, self.prefix_scope) {
             for h in &mut batch {
                 h.path = format!("{s}/{}", h.path);
             }
         }
         // Search Everywhere lists each line once (its first match); Find in Files every match.
         if self.popup.as_ref().is_some_and(|p| p.kind == PopupKind::Quick) {
-            batch.dedup_by(|b, a| a.line == b.line);
+            batch.dedup_by(|b, a| a.line == b.line && a.path == b.path);
         }
         let room = search::MAX_HITS.saturating_sub(self.hits.len());
         if room > 0 && !batch.is_empty() {
-            self.hit_files += 1;
+            for h in batch.iter().take(room) {
+                if !self.hit_paths.contains(&h.path) {
+                    self.hit_paths.insert(h.path.clone());
+                }
+            }
+            self.hit_files = self.hit_paths.len();
             self.hits.extend(batch.into_iter().take(room));
         }
     }
@@ -300,6 +382,7 @@ impl Project {
         let input = self.popup.as_ref().map(|p| p.input.clone()).unwrap_or_default();
         self.hits.clear();
         self.hit_files = 0;
+        self.hit_paths.clear();
         self.searched = input.clone();
         if let Some(p) = &mut self.popup {
             p.selected = 0;
@@ -311,10 +394,63 @@ impl Project {
         let scope = self.popup.as_ref().filter(|p| p.kind == PopupKind::Quick).and(self.quick.scope.clone()).or(repo);
         self.search_scope = scope.clone();
         // Dropping the old job cancels it.
-        self.search = (q.trim().chars().count() >= 2).then(|| match &scope {
+        self.search = None;
+        if q.trim().chars().count() < 2 {
+            return;
+        }
+        // The code index when every root it needs is ready (decision 0014), else a walk.
+        let opts = crate::index::FindOpts {
+            per_line: self.popup.as_ref().is_some_and(|p| p.kind == PopupKind::Quick),
+            boost: self.recent.iter().map(|r| self.rel(r)).collect(),
+        };
+        let parts = self.index_parts(scope.as_deref());
+        let indexed = self.code_index.as_ref().and_then(|i| i.find_multi(parts, q.clone(), opts));
+        // The index gives project paths; a walk of the scope folder gives paths inside it.
+        self.prefix_scope = indexed.is_none();
+        self.search = Some(indexed.unwrap_or_else(|| match &scope {
             Some(s) => search::find_in_files(self.abs(s), q),
             None => search::find_in_roots(self.ws.prefixes(), q),
-        });
+        }));
+    }
+
+    /// The roots a search with project-path `scope` covers: (path prefix, root, folder in it).
+    fn index_parts(&self, scope: Option<&str>) -> Vec<(String, PathBuf, Option<String>)> {
+        let mut out = Vec::new();
+        for (pre, root) in self.ws.prefixes() {
+            let inner = match scope {
+                None => None,
+                Some(s) if pre.is_empty() => Some(s.to_string()),
+                Some(s) if s == pre => None,
+                Some(s) => match s.strip_prefix(&format!("{pre}/")) {
+                    Some(rest) => Some(rest.to_string()),
+                    None => continue,
+                },
+            };
+            out.push((pre, root, inner));
+        }
+        out
+    }
+
+    /// Search Everywhere's symbols for the current input (code index only; no debounce: the
+    /// symbol tables are in memory).
+    fn start_symbols(&mut self) {
+        let q = self.popup.as_ref().map(|p| p.input.trim().to_string()).unwrap_or_default();
+        let (_, q) = self.repo_scope(&q);
+        let (q, _) = split_line_suffix(q);
+        self.sym_job = None;
+        if q.chars().count() < 2 {
+            self.syms.clear();
+            return;
+        }
+        let parts = self.index_parts(self.quick.scope.as_deref());
+        let (root, scope) = match parts.as_slice() {
+            [(_, r, s)] => (Some(r.clone()), s.clone()),
+            _ => (None, None),
+        };
+        self.sym_job = self.code_index.as_ref().and_then(|i| i.find_symbols(root.as_deref(), scope, q.to_string(), 40));
+        if self.sym_job.is_none() {
+            self.syms.clear();
+        }
     }
 
     /// Recomputes the finder / recent rows for the current input.
@@ -370,13 +506,19 @@ impl Project {
         if kind == PopupKind::Quick {
             self.hits.clear();
             self.hit_files = 0;
+            self.hit_paths.clear();
             self.search = None;
             self.searched = String::new();
+            self.syms.clear();
+            self.sym_job = None;
         }
         self.snap_tree();
         self.popup = Some(Popup { kind, input, selected: 0, scroll: 0 });
         if research {
             self.search_due = Some(Instant::now().checked_sub(SEARCH_DEBOUNCE).unwrap_or_else(Instant::now));
+        }
+        if kind == PopupKind::Quick {
+            self.start_symbols();
         }
         self.matches_stale = true;
         self.refilter_if_list();
@@ -433,6 +575,7 @@ impl Project {
             PopupKind::Quick => {
                 self.search_due = Some(Instant::now());
                 self.refilter();
+                self.start_symbols();
             }
             _ => self.refilter(),
         }
@@ -834,9 +977,10 @@ impl App {
                 d.select(s, (s + len).min(d.line_end(d.line())));
             }
         }
+        let note = self.docs[i].large_note();
         self.project.note_opened(&want);
         self.project.focus_tree = false;
-        self.message = Some(self.project.show(&want));
+        self.message = Some(note.unwrap_or_else(|| self.project.show(&want)));
         self.follow = true;
     }
 }
