@@ -191,8 +191,6 @@ impl DiffView {
 
 pub struct Git {
     project: PathBuf,
-    /// The workspace root's label when there are several (status bar, Commit panel, Git view).
-    pub label: Option<String>,
     /// Repository root (canonical); None outside a repository.
     pub root: Option<PathBuf>,
     pub branch: Option<String>,
@@ -223,7 +221,6 @@ impl Git {
     pub fn new(project: &Path) -> Self {
         Git {
             project: project.to_path_buf(),
-            label: None,
             root: None,
             branch: None,
             head: None,
@@ -250,11 +247,6 @@ impl Git {
             commit_job: None,
             changed: false,
         }
-    }
-
-    /// The folder this state reads (a workspace root, or the project).
-    pub fn project_dir(&self) -> &Path {
-        &self.project
     }
 
     /// Whether a job delivered something since the last call (the screen needs a redraw).

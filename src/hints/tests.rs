@@ -275,16 +275,9 @@ fn fingerprint(app: &App) -> String {
         gv.undo.len(),
         gv.blames.on.len()
     );
-    let ws = &app.workspace;
-    let workspace = format!(
-        "{} {} {:?}",
-        app.project.ws.roots.len(),
-        ws.current,
-        ws.popup.as_ref().map(|p| (p.mode, p.sel, p.filter.clone(), p.input.clone(), p.only_changed, p.wsel, p.plan.as_ref().map(|x| x.question.clone())))
-    );
     format!(
-        "active {} docs {docs:?}\nprompt {prompt:?} msg {:?} quit {} clip {:?}\nproject {popup:?} {tree:?}\nagents {agents}\ndock {dock} term {term:?}\nvim {vim:?} lsp {lsp} hints {}\ngit view {git_view}\nworkspace {workspace}",
-        app.active, app.message, app.quit, app.clip.text, app.hints.on
+        "active {} docs {docs:?}\nprompt {prompt:?} msg {:?} quit {} clip {:?}\nproject {popup:?} {tree:?}\nagents {agents}\ndock {dock} term {term:?}\nvim {vim:?} lsp {lsp} hints {}\ngit view {git_view}\nmission {}",
+        app.active, app.message, app.quit, app.clip.text, app.hints.on, app.mission.fingerprint()
     )
 }
 
@@ -510,63 +503,62 @@ fn setups(ctx: Ctx) -> Vec<Setup> {
             keys(app, "/");
             keys(app, "fi");
         }],
-        Ctx::Repos => vec![|app| keys(app, "Ctrl+O")],
-        Ctx::ReposInput => vec![
-            |app| {
-                keys(app, "Ctrl+O");
-                keys(app, "a");
-                keys(app, "sub");
-            },
-            |app| {
-                keys(app, "Ctrl+O");
-                keys(app, "/");
-            },
-        ],
-        Ctx::ReposConfirm => vec![|app| {
-            keys(app, "Ctrl+O");
-            repos_confirm(app);
-        }],
-        Ctx::Workspaces => vec![
-            |app| {
-                keys(app, "Ctrl+O");
-                repos_recent(app);
-            },
-            |app| {
-                keys(app, "Ctrl+O");
-                repos_recent(app);
-                app.workspace.popup.as_mut().unwrap().wsel = 1;
-            },
-        ],
         Ctx::Blame => vec![|app| {
             let path = app.docs[0].path.clone().unwrap();
             assert!(app.git_view.blames.toggle(&path));
             let rev = app.docs[0].rev();
             wait(app, "blame", |a| a.git_view.blames.get(Some(&path)).is_some_and(|b| b.rev == Some(rev)));
         }],
+        Ctx::Mission => vec![|app| mission(app, false), |app| mission(app, true)],
+        Ctx::MissionTranscript => vec![|app| {
+            mission(app, false);
+            keys(app, "Enter");
+            let m = &mut app.mission;
+            m.t_max = 10;
+            m.t_scroll = 5;
+            m.t_follow = false;
+        }],
+        Ctx::MissionInput => vec![|app| {
+            mission(app, false);
+            keys(app, "n");
+            let inp = app.mission.input.as_mut().unwrap();
+            inp.text = "do it".into();
+            inp.kind = crate::mission::InputKind::New { worktree: false, repo: 0 };
+        }],
+        Ctx::MissionConfirm => vec![|app| {
+            mission(app, false);
+            app.agents.runs[1].worktree = Some(crate::mission::worktree::Worktree {
+                path: app.project.root.join("no-such-worktree"),
+                branch: "no-such-branch".into(),
+                repo: app.project.root.clone(),
+                base_branch: Some("main".into()),
+                base_head: "0".into(),
+            });
+            app.mission.confirm = Some(crate::mission::Confirm { question: "Remove?".into(), act: crate::mission::Act::Remove(2), can_rebase: false });
+        }],
+        Ctx::Ask => vec![|app| keys(app, "Ctrl+U")],
+    }
+}
+
+/// Mission control with two finished runs (sessions, no worktree or snapshot); `bottom`
+/// selects the older one.
+fn mission(app: &mut App, bottom: bool) {
+    let root = app.project.root.clone();
+    let mut runs = Vec::new();
+    for id in [1, 2] {
+        let mut r = crate::agents::run::Run::new(id, root.clone(), if id == 1 { "first" } else { "second" });
+        r.session_id = Some(format!("s{id}"));
+        runs.push(r);
+    }
+    app.agents.runs = runs;
+    keys(app, "Ctrl+O");
+    assert!(app.mission.open);
+    if bottom {
+        app.mission.sel = Some(1);
     }
 }
 
 /// The Git view open on the Changes review (a.txt with two hunks, b.txt).
-/// A question in the Repos popup: a fetch plan for a repo that has a (local, bare) remote.
-fn repos_confirm(app: &mut App) {
-    use crate::workspace::repos::{plan, Mode, Op};
-    let st = crate::workspace::status::RepoState { top: Some(app.project.root.clone()), remotes: 1, ..Default::default() };
-    let pl = plan(Op::Fetch, &[("x".into(), app.project.root.clone(), Some(&st))]).unwrap();
-    let p = app.workspace.popup.as_mut().unwrap();
-    p.plan = Some(pl);
-    p.mode = Mode::Confirm;
-}
-
-/// The recent-workspaces list with two entries (written by hand: tests never save the list).
-fn repos_recent(app: &mut App) {
-    use crate::workspace::{Recent, RecentRoot};
-    let r = |n: &str| Recent { name: n.into(), home: app.project.root.clone(), file: None, roots: vec![RecentRoot { path: app.project.root.clone(), label: n.into() }], opened: 0 };
-    let list = vec![r("one"), r("two")];
-    let p = app.workspace.popup.as_mut().unwrap();
-    p.recents = list;
-    p.mode = crate::workspace::repos::Mode::Workspaces;
-}
-
 fn git_view(app: &mut App) {
     keys(app, "Ctrl+L");
     assert!(app.git_view.open, "{:?}", app.message);
@@ -736,10 +728,11 @@ binding_tests! {
     keys_git_confirm => GitConfirm,
     keys_git_input => GitInput,
     keys_blame => Blame,
-    keys_repos => Repos,
-    keys_repos_input => ReposInput,
-    keys_repos_confirm => ReposConfirm,
-    keys_workspaces => Workspaces,
+    keys_mission => Mission,
+    keys_mission_transcript => MissionTranscript,
+    keys_mission_input => MissionInput,
+    keys_mission_confirm => MissionConfirm,
+    keys_ask => Ask,
 }
 
 // ---- context selection and drawing in a real App ---------------------------------------------

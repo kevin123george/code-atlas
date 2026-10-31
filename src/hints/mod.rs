@@ -88,6 +88,22 @@ pub fn context(app: &App) -> Ctx {
     use crate::lsp::popup::Popup;
     use crate::project::PopupKind;
     use crate::vim::Mode;
+    // Mission control and the ask prompt take every key while open (decision 0015).
+    if app.mission.ask.is_some() {
+        return Ctx::Ask;
+    }
+    if app.mission.open {
+        let m = &app.mission;
+        return if m.confirm.is_some() {
+            Ctx::MissionConfirm
+        } else if m.input.is_some() {
+            Ctx::MissionInput
+        } else if m.view == crate::mission::View::Transcript && m.sel.is_some_and(|id| app.agents.run_index(id).is_some()) {
+            Ctx::MissionTranscript
+        } else {
+            Ctx::Mission
+        };
+    }
     let dock = &app.dock;
     if dock.git.diff.is_some() {
         return Ctx::Diff;
@@ -101,15 +117,6 @@ pub fn context(app: &App) -> Ctx {
     }
     if app.prompt.is_some() {
         return Ctx::Prompt;
-    }
-    if let Some(p) = &app.workspace.popup {
-        use crate::workspace::repos::Mode as M;
-        return match p.mode {
-            M::List => Ctx::Repos,
-            M::Filter | M::Add => Ctx::ReposInput,
-            M::Confirm => Ctx::ReposConfirm,
-            M::Workspaces => Ctx::Workspaces,
-        };
     }
     if app.git_view_focused() {
         let v = &app.git_view;

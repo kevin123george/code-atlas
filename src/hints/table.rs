@@ -77,16 +77,16 @@ pub enum Ctx {
     GitConfirm,
     GitInput,
     Blame,
-    /// The Repos popup (Ctrl+O, decision 0013) and its modes.
-    Repos,
-    ReposInput,
-    ReposConfirm,
-    Workspaces,
+    Mission,
+    MissionTranscript,
+    MissionInput,
+    MissionConfirm,
+    Ask,
 }
 
 /// Every context (tests walk them all).
 #[cfg(test)]
-pub const ALL: [Ctx; 33] = [
+pub const ALL: [Ctx; 34] = [
     Ctx::Idea,
     Ctx::Selection,
     Ctx::VimNormal,
@@ -116,10 +116,11 @@ pub const ALL: [Ctx; 33] = [
     Ctx::GitConfirm,
     Ctx::GitInput,
     Ctx::Blame,
-    Ctx::Repos,
-    Ctx::ReposInput,
-    Ctx::ReposConfirm,
-    Ctx::Workspaces,
+    Ctx::Mission,
+    Ctx::MissionTranscript,
+    Ctx::MissionInput,
+    Ctx::MissionConfirm,
+    Ctx::Ask,
 ];
 
 const GOTO_FILE: Hint = fb("Ctrl+Shift+N", "Ctrl+P", "go to file");
@@ -137,8 +138,9 @@ const UNDO_REDO: Hint = fb("Ctrl+(Shift+)Z", "Ctrl+Z/Alt+Z", "undo / redo");
 const COMPLETE: Hint = h("Ctrl+Space/J", "complete");
 /// The Git view (decision 0012): Ctrl+L reaches every terminal; Alt+8 too where Option is Meta.
 const GIT_VIEW: Hint = h("Ctrl+L", "git review / log");
-/// The Repos popup (decision 0013): Ctrl+O reaches every terminal and nothing else used it.
-const REPOS: Hint = h("Ctrl+O", "repos (workspace)");
+/// Mission control and ask-an-agent (decision 0015): Ctrl+O / Ctrl+U reach every terminal
+/// (Alt+7 / Alt+A too where Option is Meta).
+const AGENTS: Hint = h("Ctrl+O/U", "agents / ask agent");
 
 /// The panel title for a context (some add a detail, see `super::title`).
 pub fn title(c: Ctx) -> &'static str {
@@ -172,10 +174,11 @@ pub fn title(c: Ctx) -> &'static str {
         Ctx::GitConfirm => "git · confirm",
         Ctx::GitInput => "git · input",
         Ctx::Blame => "editor · blame",
-        Ctx::Repos => "repos",
-        Ctx::ReposInput => "repos · input",
-        Ctx::ReposConfirm => "repos · confirm",
-        Ctx::Workspaces => "recent workspaces",
+        Ctx::Mission => "mission control",
+        Ctx::MissionTranscript => "mission · transcript",
+        Ctx::MissionInput => "mission · prompt",
+        Ctx::MissionConfirm => "mission · confirm",
+        Ctx::Ask => "ask an agent",
     }
 }
 
@@ -187,7 +190,7 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
             QUICK,
             COMPLETE,
             GIT_VIEW,
-            h("Ctrl+F/G", "find / go to line"),
+            AGENTS,
             h("Ctrl+B", "go to definition"),
             h("Alt+1/F12", "project / terminal"),
             UNDO_REDO,
@@ -196,7 +199,7 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
             h("Ctrl+D", "duplicate"),
             h("Ctrl+/", "comment lines"),
             h("Tab/Shift+Tab", "indent / unindent"),
-            h("(", "wrap: ( [ { \" '"),
+            h("Ctrl+U", "ask an agent"),
             h("Ctrl+C/X", "copy / cut"),
             h("Alt+Shift+↑/↓", "move lines"),
             FIND_IN_FILES,
@@ -236,9 +239,9 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
             h("Enter", "open"),
             h("a-z", "speed search"),
             h("Ctrl+T", "search in folder"),
-            h("-", "collapse all"),
-            REPOS,
             h("Esc", "editor"),
+            h("Alt+1", "hide tree"),
+            GOTO_FILE,
         ] },
         Ctx::TreeSearch => const { &[
             h("a-z", "narrow"),
@@ -323,6 +326,7 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
             h("Ctrl+C", "stop"),
             h("Del", "remove from list"),
             h("Tab", "transcript"),
+            h("Ctrl+O", "mission control"),
             h("Esc", "editor"),
         ] },
         Ctx::AgentsTranscript => const { &[
@@ -380,19 +384,6 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
         ] },
         Ctx::GitConfirm => const { &[h("y/Enter", "yes, do it"), h("n/Esc", "no")] },
         Ctx::GitInput => const { &[h("a-z", "type"), h("Enter", "apply"), h("Backspace", "delete"), h("Esc", "done")] },
-        Ctx::Repos => const { &[
-            h("Enter", "make it the current repo"),
-            h("g/l/c", "its changes / log / commit"),
-            h("F/U", "fetch / pull all (asks)"),
-            h("/", "filter by name"),
-            h("a", "add a folder as a root"),
-            h("d", "remove from workspace"),
-            h("w", "recent workspaces"),
-            h("Esc", "close"),
-        ] },
-        Ctx::ReposInput => const { &[h("a-z", "type"), h("Enter", "apply"), h("Backspace", "delete"), h("Ctrl+U", "clear"), h("Esc", "cancel")] },
-        Ctx::ReposConfirm => const { &[h("y/Enter", "yes, do it"), h("n/Esc", "no")] },
-        Ctx::Workspaces => const { &[h("↑/↓", "select"), h("Enter", "open it"), h("Esc", "back to repos")] },
         Ctx::Blame => const { &[
             h("Ctrl+L", "this line's commit"),
             GOTO_FILE,
@@ -400,6 +391,41 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
             COMPLETE,
             h("Ctrl+F/G", "find / go to line"),
             UNDO_REDO,
+        ] },
+        Ctx::Mission => const { &[
+            h("↑/↓", "pick an agent"),
+            h("Enter", "transcript"),
+            h("n", "new agent (worktree)"),
+            h("f", "follow-up"),
+            h("d", "review its changes"),
+            h("l", "land branch (asks)"),
+            h("x", "discard (asks)"),
+            h("Esc", "close"),
+        ] },
+        Ctx::MissionTranscript => const { &[
+            h("↑/↓", "scroll"),
+            h("PgUp/PgDn", "page"),
+            h("End", "follow the end"),
+            h("f", "follow-up"),
+            h("d", "review its changes"),
+            h("l", "land (asks)"),
+            h("Esc", "back to the cards"),
+        ] },
+        Ctx::MissionInput => const { &[
+            h("a-z", "type the task"),
+            h("Enter", "start / send"),
+            h("Tab", "worktree / in place"),
+            h("Ctrl+R", "next repository"),
+            h("Ctrl+U", "clear"),
+            h("Esc", "cancel"),
+        ] },
+        Ctx::MissionConfirm => const { &[h("y/Enter", "yes, do it"), h("n/Esc", "no")] },
+        Ctx::Ask => const { &[
+            h("a-z", "type a task"),
+            h("↑/↓", "explain / fix / tests"),
+            h("Tab", "worktree / in place"),
+            h("Enter", "start the agent"),
+            h("Esc", "cancel"),
         ] },
     }
 }

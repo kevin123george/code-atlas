@@ -20,8 +20,7 @@ pub fn walker(dir: &Path) -> WalkBuilder {
     let mut w = WalkBuilder::new(dir);
     w.hidden(false).require_git(false).follow_links(false).filter_entry(|e| {
         let is_dir = e.file_type().is_some_and(|t| t.is_dir());
-        let name = e.file_name().to_string_lossy();
-        !skip_name(&name, is_dir) && !crate::workspace::excluded(e.path(), &name)
+        !skip_name(&e.file_name().to_string_lossy(), is_dir)
     });
     w
 }
@@ -74,43 +73,6 @@ impl Tree {
         };
         t.expand(0);
         t
-    }
-
-    /// A workspace tree: one top row per root (named by its label). Up to three roots start
-    /// unfolded; more start folded, so 30 repos fit on one screen.
-    pub fn new_multi(roots: &[(PathBuf, String)]) -> Self {
-        let mut t = Tree {
-            rows: roots.iter().map(|(p, l)| Node { path: p.clone(), name: l.clone(), is_dir: true, depth: 0, expanded: false }).collect(),
-            selected: 0,
-            scroll: 0,
-            follow: true,
-            speed: String::new(),
-        };
-        if roots.len() <= 3 {
-            for i in (0..roots.len()).rev() {
-                t.expand(i);
-            }
-        }
-        t
-    }
-
-    /// Collapse all (`-` in the tree): every root folds (several roots), or everything below
-    /// the root (one root). The selection moves up to the row that stays.
-    pub fn collapse_all(&mut self) {
-        let multi = self.rows.iter().filter(|n| n.depth == 0).count() > 1;
-        let level = if multi { 0 } else { 1 };
-        let keep = (0..=self.selected.min(self.rows.len().saturating_sub(1))).rev().find(|&i| self.rows[i].depth <= level).unwrap_or(0);
-        let keep_path = self.rows.get(keep).map(|n| n.path.clone());
-        let mut i = 0;
-        while i < self.rows.len() {
-            if self.rows[i].depth == level && self.rows[i].expanded {
-                self.collapse(i);
-            }
-            i += 1;
-        }
-        self.selected = keep_path.and_then(|p| self.rows.iter().position(|n| n.path == p)).unwrap_or(0);
-        self.scroll = self.scroll.min(self.selected);
-        self.follow = true;
     }
 
     pub fn selected_node(&self) -> Option<&Node> {
@@ -197,11 +159,9 @@ impl Tree {
         self.follow = true;
     }
 
-    /// Expands the folders down to `path` (inside a root) and selects it.
+    /// Expands the folders down to `path` (inside the root) and selects it.
     pub fn reveal(&mut self, path: &Path) -> bool {
-        // The top row (root) holding the path: the innermost one when roots nest.
-        let top = (0..self.rows.len()).filter(|&k| self.rows[k].depth == 0 && path.starts_with(&self.rows[k].path)).max_by_key(|&k| self.rows[k].path.as_os_str().len());
-        let Some(mut i) = top else { return false };
+        let mut i = 0;
         loop {
             let n = &self.rows[i];
             if n.path == path {

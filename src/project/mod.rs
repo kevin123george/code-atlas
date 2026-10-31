@@ -77,10 +77,7 @@ pub struct Match {
 }
 
 pub struct Project {
-    /// The folder catlas was pointed at: the only root, or a workspace's home (decision 0013).
     pub root: PathBuf,
-    /// The roots (one, or several in a workspace); project paths go through it (`rel`, `abs`).
-    pub ws: crate::workspace::Workspace,
     pub tree: Tree,
     pub sidebar: bool,
     pub focus_tree: bool,
@@ -119,6 +116,17 @@ pub struct Project {
     pub popup_rect: Rect,
 }
 
+/// Splits command-line arguments: the first folder becomes the project root (the current folder
+/// when none is given); the rest are files to open. Returns (root, files, opened as a project).
+pub fn split_args(paths: Vec<PathBuf>) -> (PathBuf, Vec<PathBuf>, bool) {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let dir = paths.iter().position(|p| p.is_dir());
+    let as_project = dir.is_some() || paths.is_empty();
+    let root = dir.map(|i| paths[i].clone()).unwrap_or(cwd);
+    let files = paths.into_iter().filter(|p| !p.is_dir()).collect();
+    (canonical(&root), files, as_project)
+}
+
 /// Canonical form for comparing paths (the path itself when it doesn't exist yet).
 pub fn canonical(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| {
@@ -144,26 +152,10 @@ pub fn split_line_suffix(q: &str) -> (&str, Option<(usize, usize)>) {
 }
 
 impl Project {
-    #[cfg(test)]
     pub fn new(root: PathBuf, show_sidebar: bool) -> Self {
-        Self::with_workspace(crate::workspace::Workspace::single(root), show_sidebar)
-    }
-
-    /// The tree of a workspace: the root itself (one root), or one top row per root.
-    fn tree_of(ws: &crate::workspace::Workspace) -> Tree {
-        if ws.multi() {
-            Tree::new_multi(&ws.roots.iter().map(|r| (r.path.clone(), r.label.clone())).collect::<Vec<_>>())
-        } else {
-            Tree::new(&ws.roots[0].path)
-        }
-    }
-
-    pub fn with_workspace(ws: crate::workspace::Workspace, show_sidebar: bool) -> Self {
-        let root = if ws.multi() { ws.home.clone() } else { ws.roots[0].path.clone() };
         Project {
-            tree: Self::tree_of(&ws),
-            index: Some(search::index_roots(ws.prefixes())),
-            ws,
+            tree: Tree::new(&root),
+            index: Some(search::index_files(root.clone())),
             root,
             sidebar: show_sidebar,
             focus_tree: false,
@@ -197,39 +189,8 @@ impl Project {
         self.search.is_some() || self.search_due.is_some()
     }
 
-    /// A project path for `p`: relative to the root, or `label/…` with several roots.
     pub fn rel(&self, p: &Path) -> String {
-        self.ws.rel(p)
-    }
-
-    /// The file behind a project path.
-    pub fn abs(&self, rel: &str) -> PathBuf {
-        self.ws.abs(rel)
-    }
-
-    /// `p` for the status bar and lists: `label › path` with several roots.
-    pub fn show(&self, p: &Path) -> String {
-        self.ws.show(&self.ws.rel(p))
-    }
-
-    /// Swaps in other roots (runtime: add / remove a root, a recent workspace): a new tree and
-    /// file index; popups close. `root` (agents, terminal) stays where catlas started.
-    pub fn set_workspace(&mut self, ws: crate::workspace::Workspace) {
-        self.close_popup();
-        self.tree = Self::tree_of(&ws);
-        self.files.clear();
-        self.index = Some(search::index_roots(ws.prefixes()));
-        self.matches_stale = true;
-        self.quick.scope = None;
-        self.hits.clear();
-        self.hit_files = 0;
-        self.searched.clear();
-        self.ws = ws;
-    }
-
-    /// `@label rest` in a popup's input: (that root's label, the rest of the query).
-    fn repo_scope<'a>(&self, input: &'a str) -> (Option<String>, &'a str) {
-        self.ws.repo_query(input)
+        search::rel(&self.root, p)
     }
 
     pub fn note_opened(&mut self, p: &Path) {
@@ -297,24 +258,19 @@ impl Project {
     }
 
     fn start_search(&mut self) {
-        let input = self.popup.as_ref().map(|p| p.input.clone()).unwrap_or_default();
+        let q = self.popup.as_ref().map(|p| p.input.clone()).unwrap_or_default();
         self.hits.clear();
         self.hit_files = 0;
-        self.searched = input.clone();
+        self.searched = q.clone();
         if let Some(p) = &mut self.popup {
             p.selected = 0;
             p.scroll = 0;
         }
-        // `@repo text` searches one root of a workspace.
-        let (repo, q) = self.repo_scope(&input);
-        let q = q.to_string();
-        let scope = self.popup.as_ref().filter(|p| p.kind == PopupKind::Quick).and(self.quick.scope.clone()).or(repo);
-        self.search_scope = scope.clone();
+        let scope = self.popup.as_ref().filter(|p| p.kind == PopupKind::Quick).and(self.quick.scope.clone());
+        let dir = scope.as_ref().map_or_else(|| self.root.clone(), |s| self.root.join(s));
+        self.search_scope = scope;
         // Dropping the old job cancels it.
-        self.search = (q.trim().chars().count() >= 2).then(|| match &scope {
-            Some(s) => search::find_in_files(self.abs(s), q),
-            None => search::find_in_roots(self.ws.prefixes(), q),
-        });
+        self.search = (q.trim().chars().count() >= 2).then(|| search::find_in_files(dir, q));
     }
 
     /// Recomputes the finder / recent rows for the current input.
@@ -322,7 +278,6 @@ impl Project {
         self.matches_stale = false;
         let Some(p) = &self.popup else { return };
         let (q, _) = split_line_suffix(p.input.trim());
-        let (repo, q) = self.repo_scope(q);
         let recent: Vec<String> = self.recent.iter().map(|r| self.rel(r)).collect();
         let mut scored: Vec<(i32, Match)> = Vec::new();
         let pool: Box<dyn Iterator<Item = &String>> = match p.kind {
@@ -331,9 +286,8 @@ impl Project {
             _ => Box::new(self.files.iter()),
         };
         // Search Everywhere started from a tree folder only looks inside it.
-        // `@repo name` looks in one root of a workspace.
-        let scope = self.quick.scope.clone().filter(|_| p.kind == PopupKind::Quick).or(repo);
-        let pool = pool.filter(|path| scope.as_deref().map_or(true, |s| quick::in_scope(path, s)));
+        let scope = self.quick.scope.as_deref().filter(|_| p.kind == PopupKind::Quick);
+        let pool = pool.filter(|path| scope.map_or(true, |s| quick::in_scope(path, s)));
         for path in pool {
             if let Some((s, pos)) = fuzzy::score(q, path) {
                 scored.push((s, Match { path: path.clone(), pos }));
@@ -450,11 +404,11 @@ impl Project {
         let p = self.popup.as_ref()?;
         match p.kind {
             PopupKind::Quick => self.quick_target(),
-            PopupKind::Search => Some(quick::hit_target(&self.ws, self.hits.get(p.selected)?)),
+            PopupKind::Search => Some(quick::hit_target(&self.root, self.hits.get(p.selected)?)),
             _ => {
                 let m = self.matches.get(p.selected)?;
                 let at = split_line_suffix(p.input.trim()).1.map(|(l, c)| (l.saturating_sub(1), c.saturating_sub(1), 0));
-                Some(Target { path: self.abs(&m.path), at })
+                Some(Target { path: self.root.join(&m.path), at })
             }
         }
     }
@@ -622,11 +576,6 @@ impl Project {
                 _ => return Some(Outcome::Handled),
             }
         } else if let KeyCode::Char(c) = k.code {
-            // Collapse all: `-` (IDEA's Ctrl+minus, which arrives where the kitty protocol is on).
-            if c == '-' && (plain || k.modifiers == KeyModifiers::CONTROL) {
-                self.tree.collapse_all();
-                return Some(Outcome::Handled);
-            }
             if plain && c != ' ' {
                 self.speed_type(c);
                 return Some(Outcome::Handled);
@@ -759,8 +708,6 @@ impl App {
     /// Called once per loop turn before drawing.
     pub fn tick(&mut self) {
         self.project.poll();
-        // Workspaces (decision 0013): statuses, the current repo following the editor.
-        let _ = self.workspace_tick();
     }
 
     /// Runs a project-view key; returns false when the project view didn't want it.
@@ -836,7 +783,7 @@ impl App {
         }
         self.project.note_opened(&want);
         self.project.focus_tree = false;
-        self.message = Some(self.project.show(&want));
+        self.message = Some(self.project.rel(&want));
         self.follow = true;
     }
 }
@@ -856,13 +803,12 @@ mod tests {
     #[test]
     fn args_split_into_root_and_files() {
         let root = tree::tests::sample();
-        let o = crate::workspace::from_args(vec![root.join("README.md"), root.clone()]);
-        assert_eq!(o.ws.roots.len(), 1);
-        assert_eq!(o.ws.roots[0].path, canonical(&root));
-        assert_eq!(o.files, vec![root.join("README.md")]);
-        assert!(o.as_project);
-        let o = crate::workspace::from_args(vec![root.join("README.md")]);
-        assert!(!o.as_project && o.files.len() == 1);
+        let (r, files, proj) = split_args(vec![root.join("README.md"), root.clone()]);
+        assert_eq!(r, canonical(&root));
+        assert_eq!(files, vec![root.join("README.md")]);
+        assert!(proj);
+        let (_, files, proj) = split_args(vec![root.join("README.md")]);
+        assert!(!proj && files.len() == 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 

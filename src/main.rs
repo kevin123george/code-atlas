@@ -11,11 +11,11 @@ mod hints;
 mod project;
 mod lsp;
 mod mackeys;
+mod mission;
 mod syntax;
 mod term;
 mod ui;
 mod vim;
-mod workspace;
 
 use std::io::{self, stdout};
 use std::path::PathBuf;
@@ -36,9 +36,6 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!("catlas [--vim] [--no-hints] [dir] [file ...]   open a project folder (default: the current one) and files in Code Atlas");
-        println!("catlas dir1 dir2 … | x.catlas.toml | folder-of-repos   a workspace with several roots (Ctrl+O: repos)");
-        println!("  --single     open a folder that holds several repos as one folder (no workspace)");
-        println!("  -w [n|name]  list the recent workspaces, or open one of them");
         println!("  --vim        start in Vim mode (also CATLAS_VIM=1; Ctrl+Alt+V toggles at runtime)");
         println!("  --no-hints   start without the shortcut helper (Alt+/ toggles it and saves the choice)");
         println!("catlas --health [dir]   which languages have highlighting and which language servers are installed");
@@ -52,31 +49,6 @@ fn main() -> Result<()> {
     if args.iter().any(|a| a == "-V" || a == "--version") {
         println!("catlas {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
-    }
-    // Workspaces (decision 0013): -w lists / reopens recent ones, --single opts out of them.
-    let mut args = args;
-    if let Some(i) = args.iter().position(|a| a == "-w" || a == "--workspace") {
-        let list = workspace::load_recent(workspace::recent_path().as_deref());
-        let Some(pick) = args.get(i + 1).cloned() else {
-            println!("{}", workspace::list_recent(&list));
-            return Ok(());
-        };
-        let Some(r) = workspace::pick_recent(&list, &pick) else {
-            eprintln!("No recent workspace {pick:?}:\n{}", workspace::list_recent(&list));
-            std::process::exit(2);
-        };
-        match r.open() {
-            Ok(ws) => *workspace::PRESET.lock().unwrap() = Some(ws),
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(2);
-            }
-        }
-        args.drain(i..i + 2);
-    }
-    if let Some(i) = args.iter().position(|a| a == "--single") {
-        workspace::SINGLE.store(true, std::sync::atomic::Ordering::Relaxed);
-        args.remove(i);
     }
     let env_vim = std::env::var("CATLAS_VIM").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"));
     let vim = env_vim || args.iter().any(|a| a == "--vim");
@@ -113,6 +85,7 @@ fn run(app: &mut app::App) -> Result<()> {
         app.tick();
         redraw |= app.agents_tick();
         redraw |= app.dock_tick();
+        redraw |= app.mission_tick();
         if redraw || last_draw.elapsed() >= Duration::from_millis(250) {
             term.draw(|f| ui::draw(f, app))?;
             redraw = false;

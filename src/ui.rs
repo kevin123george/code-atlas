@@ -79,18 +79,21 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // The Git view covers the tree and the editor (not the agents panel: watch and review).
     let view_area = text_area;
     let text_area = crate::project::ui::draw_sidebar(buf, app, text_area);
-    let cursor = draw_text(buf, app, text_area).filter(|_| !app.project.focus_tree && !app.agents.focus && !app.dock.has_focus() && !app.git_view.open);
+    let cursor = draw_text(buf, app, text_area).filter(|_| !app.project.focus_tree && !app.agents.focus && !app.dock.has_focus() && !app.git_view.open && !app.mission.open && app.mission.ask.is_none());
     crate::dock::draw_over_editor(buf, app, text_area);
     let view_cursor = crate::git::view_ui::draw(buf, app, view_area);
-    crate::hints::ui::draw(buf, app, text_area);
+    // Mission control covers everything under the tab bar (decision 0015).
+    let mission_cursor = crate::mission::ui::draw(buf, app, Rect::new(area.x, area.y + 1, area.width, area.height - 2));
+    // Over mission control the helper sits above its footer (up to two rows).
+    let hints_area = if app.mission.open { Rect::new(area.x, area.y + 3, area.width, area.height.saturating_sub(7)) } else { text_area };
+    crate::hints::ui::draw(buf, app, hints_area);
 
     let status = Rect::new(area.x, area.bottom() - 1, area.width, 1);
     let prompt_cursor = draw_status(buf, app, status);
     let lsp_cursor = app.draw_lsp_popups(f.buffer_mut(), cursor, prompt_cursor.is_some(), area);
     let popup_cursor = crate::project::ui::draw_popup(f.buffer_mut(), &mut app.project, area);
-    let repos_cursor = crate::workspace::ui::draw_popup(f.buffer_mut(), app, area);
 
-    if let Some(p) = repos_cursor.or(popup_cursor).or(lsp_cursor).or(prompt_cursor).or(dock_cursor).or(view_cursor).or(panel_cursor).or(cursor) {
+    if let Some(p) = mission_cursor.or(popup_cursor).or(lsp_cursor).or(prompt_cursor).or(dock_cursor).or(view_cursor).or(panel_cursor).or(cursor) {
         f.set_cursor_position(p);
     }
 }
@@ -99,10 +102,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 pub fn block_cursor(app: &App) -> bool {
     app.prompt.is_none()
         && app.project.popup.is_none()
-        && app.workspace.popup.is_none()
         && !app.project.focus_tree
         && !app.dock.has_focus()
         && !app.git_view.open
+        && !app.mission.open
+        && app.mission.ask.is_none()
         && !app.lsp.picker_open()
         && app.vim.as_ref().is_some_and(|v| v.cmdline().is_none() && v.mode != Mode::Insert)
 }
@@ -113,8 +117,11 @@ fn draw_tabs(buf: &mut Buffer, app: &mut App, area: Rect) {
     buf.set_string(area.x, area.y, brand, Style::new().fg(ACCENT).bg(SURFACE_1).add_modifier(Modifier::BOLD));
     let mut x = area.x + brand.chars().count() as u16;
     app.tab_spans.clear();
+    let editing = crate::mission::presence::editing(&app.agents);
     for (i, d) in app.docs.iter().enumerate() {
-        let title = format!(" {}{} ", d.name(), if d.dirty() { " ●" } else { "" });
+        // An agent writing this file right now: ✳ in its colour (decision 0015).
+        let agent = d.path.as_deref().and_then(|p| editing.get(&crate::project::canonical(p)).copied());
+        let title = format!(" {}{}{} ", d.name(), if d.dirty() { " ●" } else { "" }, if agent.is_some() { " ✳" } else { "" });
         let w = title.chars().count() as u16;
         let style = if i == app.active {
             Style::new().fg(TEXT).bg(SURFACE_2).add_modifier(Modifier::BOLD)
@@ -125,6 +132,9 @@ fn draw_tabs(buf: &mut Buffer, app: &mut App, area: Rect) {
             break;
         }
         buf.set_string(x, area.y, &title, style);
+        if let Some(id) = agent {
+            buf[(x + w - 2, area.y)].set_fg(crate::mission::presence::color(id));
+        }
         if i == app.active {
             // Accent underline effect on the active tab's first cell.
             buf[(x, area.y)].set_fg(ACCENT).set_symbol("▎");
@@ -146,8 +156,9 @@ fn draw_text(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
     let follow = app.follow;
     let diags = app.diag_spans();
     let d = &mut app.docs[app.active];
-    // The editor file's own repo, also when another workspace root is current.
-    let marks = crate::workspace::repos::marks(&app.dock.git, &app.workspace, d.path.as_deref());
+    let marks = app.dock.git.marks(d.path.as_deref());
+    // Lines an agent changed this session: line numbers in its colour (decision 0015).
+    let agent_lines = app.mission.lines.get(d.path.as_deref());
     // Blame (git view `b`): its own columns left of the line numbers.
     let blame = app.git_view.blames.get(d.path.as_deref()).filter(|_| area.width > crate::git::blame::WIDTH + 20);
     let blame_x = area.x;
@@ -184,7 +195,11 @@ fn draw_text(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
         }
         let line_bg = if is_cur { SURFACE_1 } else { PAPER };
         buf.set_style(Rect::new(area.x, y, area.width, 1), Style::new().bg(line_bg));
-        let num_style = if is_cur { Style::new().fg(ACCENT) } else { Style::new().fg(MUTED) };
+        let num_style = match agent_lines {
+            Some((c, l)) if l.get(line).copied().unwrap_or(false) => Style::new().fg(c).add_modifier(Modifier::BOLD),
+            _ if is_cur => Style::new().fg(ACCENT),
+            _ => Style::new().fg(MUTED),
+        };
         buf.set_string(area.x, y, format!("{:>w$}  ", line + 1, w = gutter_w as usize - 2), num_style.bg(line_bg));
         let (ls, le) = (d.line_start(line), d.line_end(line));
         if let Some(sev) = diags.iter().filter(|(s, e, _)| *s <= le && *e > ls || *s == ls).map(|g| g.2).min() {
@@ -279,6 +294,7 @@ fn draw_status(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> 
         return Some(Position::new((area.x + line.chars().count() as u16).min(area.right() - 1), area.y));
     }
     let rw = rw + crate::git::ui::draw_branch(buf, &app.dock.git, area, rw);
+    let rw = rw + crate::mission::ui::draw_ticker(buf, app, area, rw);
     if let Some(p) = &app.prompt {
         let label = format!(" {}: ", p.kind.label());
         buf.set_string(area.x, area.y, &label, Style::new().fg(ACCENT).bg(SURFACE_2).add_modifier(Modifier::BOLD));

@@ -194,6 +194,53 @@ pub fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+pub fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// What a run is doing, for mission control and the status-bar ticker.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Activity {
+    /// Running, no init line yet.
+    Starting,
+    Thinking,
+    Editing(String),
+    Command(String),
+    Reading(String),
+    Tool(String, String),
+    /// The turn finished: the agent waits for a review, a follow-up or landing.
+    Waiting,
+    /// The turn finished but something needs a look (permission denials).
+    Attention(String),
+    Failed,
+    Stopped,
+    Landed(String),
+}
+
+impl Activity {
+    /// A short phrase: "editing src/x.rs", "running cargo test", "waiting for you".
+    pub fn label(&self) -> String {
+        match self {
+            Activity::Starting => "starting".into(),
+            Activity::Thinking => "thinking".into(),
+            Activity::Editing(a) => format!("editing {a}"),
+            Activity::Command(a) => format!("running {a}"),
+            Activity::Reading(a) => format!("reading {a}"),
+            Activity::Tool(n, a) if a.is_empty() => format!("using {n}"),
+            Activity::Tool(n, a) => format!("{n} {a}"),
+            Activity::Waiting => "waiting for you".into(),
+            Activity::Attention(why) => format!("needs you · {why}"),
+            Activity::Failed => "failed".into(),
+            Activity::Stopped => "stopped".into(),
+            Activity::Landed(l) => l.clone(),
+        }
+    }
+
+    pub fn working(&self) -> bool {
+        matches!(self, Activity::Starting | Activity::Thinking | Activity::Editing(_) | Activity::Command(_) | Activity::Reading(_) | Activity::Tool(..))
+    }
+}
+
 /// The working tree when a run started (decision 0012): HEAD and a snapshot tree of every
 /// file (`git::snapshot`, the user's index untouched), so a review can show what changed since.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -244,8 +291,23 @@ pub struct Run {
     /// "3 files +42 −7" since `base`, counted after each turn.
     #[serde(default)]
     pub stat: Option<String>,
+    /// Tokens of the finished turns (input incl. cache + output).
+    #[serde(default)]
+    pub tokens: u64,
+    /// The git worktree the agent works in (mission control, decision 0015); `None` = in place.
+    #[serde(default)]
+    pub worktree: Option<crate::mission::worktree::Worktree>,
+    /// What happened to its work: "landed in main (fast-forward)", "discarded", ...
+    #[serde(default)]
+    pub landed: Option<String>,
     #[serde(skip)]
     pub proc: Option<Proc>,
+    /// When stream lines arrived (ms since the epoch, newest last): the activity sparkline.
+    #[serde(skip)]
+    pub pulse: Vec<u64>,
+    /// Files its edit tools wrote in the turn that is running now.
+    #[serde(skip)]
+    pub turn_touched: Vec<PathBuf>,
     /// Edit-tool calls waiting for their result: tool id → the file they write.
     #[serde(skip)]
     pending_files: HashMap<String, PathBuf>,
@@ -286,13 +348,96 @@ impl Run {
             base: None,
             touched: Vec::new(),
             stat: None,
+            tokens: 0,
+            worktree: None,
+            landed: None,
             proc: None,
+            pulse: Vec::new(),
+            turn_touched: Vec::new(),
             pending_files: HashMap::new(),
         }
     }
 
     pub fn running(&self) -> bool {
         self.state == State::Running
+    }
+
+    /// The checkout this run belongs to: the repository its worktree was made from, else its
+    /// folder. Lists group runs by it (several repos: one per agent, decision 0015).
+    pub fn home(&self) -> &Path {
+        self.worktree.as_ref().map_or(self.cwd.as_path(), |w| w.repo.as_path())
+    }
+
+    /// Files the agent is writing right now: edit tools waiting for their result and files
+    /// written in the running turn. Empty when it isn't running.
+    pub fn editing_now(&self) -> Vec<PathBuf> {
+        if !self.running() {
+            return Vec::new();
+        }
+        let mut v: Vec<PathBuf> = self.pending_files.values().cloned().collect();
+        for p in &self.turn_touched {
+            if !v.contains(p) {
+                v.push(p.clone());
+            }
+        }
+        v
+    }
+
+    /// What the agent is doing, from its transcript (mission control's state column).
+    pub fn activity(&self) -> Activity {
+        if let Some(l) = &self.landed {
+            return Activity::Landed(l.clone());
+        }
+        match self.state {
+            State::Running => {
+                let turn = self.entries.iter().rposition(|e| matches!(e, Entry::User { .. })).unwrap_or(0);
+                let tail = &self.entries[turn..];
+                let pending = tail.iter().rev().find_map(|e| match e {
+                    Entry::Tool { name, arg, status: ToolStatus::Pending, .. } => Some((name.clone(), arg.clone())),
+                    _ => None,
+                });
+                match pending {
+                    Some((n, a)) if matches!(n.as_str(), "Edit" | "Write" | "MultiEdit" | "NotebookEdit") => Activity::Editing(a),
+                    Some((n, a)) if n == "Bash" => Activity::Command(a),
+                    Some((n, a)) if matches!(n.as_str(), "Read" | "Grep" | "Glob") => Activity::Reading(a),
+                    Some((n, a)) => Activity::Tool(n, a),
+                    None if !tail.iter().any(|e| matches!(e, Entry::Info { .. })) => Activity::Starting,
+                    None => Activity::Thinking,
+                }
+            }
+            State::Failed => Activity::Failed,
+            State::Stopped => Activity::Stopped,
+            State::Done => match self.entries.iter().rev().find_map(|e| match e {
+                Entry::Done { denials, .. } => Some(*denials),
+                _ => None,
+            }) {
+                Some(n) if n > 0 => Activity::Attention(format!("{n} denied")),
+                _ => Activity::Waiting,
+            },
+        }
+    }
+
+    /// The newest tool call or text, as one line (mission control's "last" row).
+    pub fn last_line(&self) -> Option<String> {
+        self.entries.iter().rev().find_map(|e| match e {
+            Entry::Tool { name, arg, .. } => Some(format!("⏺ {name} {arg}")),
+            Entry::Text { text } => text.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| format!("⏺ {l}")),
+            Entry::Error { text } => Some(format!("✗ {}", text.lines().next().unwrap_or(""))),
+            Entry::Stopped => Some("■ stopped".into()),
+            _ => None,
+        })
+    }
+
+    /// Stream lines per bucket of `bucket_ms`, the last `n` buckets up to `now_ms` (oldest first).
+    pub fn sparkline(&self, now_ms: u64, bucket_ms: u64, n: usize) -> Vec<u32> {
+        let mut v = vec![0u32; n];
+        for &t in &self.pulse {
+            let age = now_ms.saturating_sub(t) / bucket_ms.max(1);
+            if (age as usize) < n {
+                v[n - 1 - age as usize] += 1;
+            }
+        }
+        v
     }
 
     /// Wall time so far, including the running turn.
@@ -316,6 +461,7 @@ impl Run {
         self.mode = turn.mode.clone();
         self.agent = turn.agent.clone();
         self.mode_used = None;
+        self.turn_touched.clear();
         self.push(Entry::User { text: turn.shown.clone(), ctx: turn.ctx.clone() });
     }
 
@@ -380,6 +526,9 @@ impl Run {
                         if !self.touched.contains(&f) {
                             self.touched.push(f.clone());
                         }
+                        if !self.turn_touched.contains(&f) {
+                            self.turn_touched.push(f.clone());
+                        }
                         ch.files.push(f);
                     }
                     if let Some(Entry::Tool { status, note, .. }) =
@@ -398,6 +547,7 @@ impl Run {
                         ch.session = true;
                     }
                     self.cost += o.cost;
+                    self.tokens += o.tokens;
                     if !o.ok && !o.text.trim().is_empty() {
                         self.push(Entry::Error { text: cap(o.text.clone()) });
                     }
@@ -454,9 +604,16 @@ impl Run {
             msgs.push(m);
         }
         all.any = !msgs.is_empty();
+        let now = now_ms();
         for m in msgs {
             let ch = match m {
-                Msg::Line(l) => self.feed_line(&l),
+                Msg::Line(l) => {
+                    self.pulse.push(now);
+                    if self.pulse.len() > 400 {
+                        self.pulse.drain(..100);
+                    }
+                    self.feed_line(&l)
+                }
                 Msg::Stderr(l) => {
                     if let Some(p) = &mut self.proc {
                         p.stderr.push(l);

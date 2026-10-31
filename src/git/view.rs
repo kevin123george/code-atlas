@@ -184,7 +184,7 @@ impl App {
         if let Some(r) = self.dock.git.root.clone() {
             return Some(r);
         }
-        super::toplevel(&self.repo_dir())
+        super::toplevel(&self.project.root)
     }
 
     /// Opens (or focuses) the view; `scope` replaces the review's scope when given.
@@ -193,6 +193,11 @@ impl App {
             self.message = Some("Not a git repository (git init to start one)".into());
             return;
         };
+        self.open_git_view_in(root, scope);
+    }
+
+    /// [`open_git_view`] on another checkout (an agent's worktree, decision 0015).
+    pub fn open_git_view_in(&mut self, root: PathBuf, scope: Option<Scope>) {
         let v = &mut self.git_view;
         if v.root.as_ref() != Some(&root) {
             v.review.set_scope(Scope::Worktree);
@@ -253,13 +258,15 @@ impl App {
             self.message = Some("This run has no snapshot to compare with (started before reviews existed, or outside a git repository)".into());
             return;
         };
-        let Some(root) = self.git_root() else {
-            self.message = Some("Not a git repository".into());
+        // An agent in its own worktree is reviewed there (mission control, decision 0015).
+        let root = if r.worktree.is_some() { super::toplevel(&r.cwd) } else { self.git_root() };
+        let Some(root) = root else {
+            self.message = Some(if r.worktree.is_some() { "Its worktree is gone".into() } else { "Not a git repository".into() });
             return;
         };
         let touched = r.touched.iter().filter_map(|p| rel_in(&root, p)).collect();
         let scope = Scope::Run { id, title: r.title.clone(), base: base.tree, since: base.at, touched, only_touched: false };
-        self.open_git_view(Some(scope));
+        self.open_git_view_in(root, Some(scope));
     }
 
     /// This project's runs that can be reviewed, newest first.
@@ -411,11 +418,6 @@ impl App {
             }
             KeyCode::Char('b') if !ctrl && !alt => {
                 self.toggle_blame();
-                return true;
-            }
-            // The Repos popup: switch repo, all repos' changes (decision 0013).
-            KeyCode::Char('o') if !ctrl && !alt => {
-                self.open_repos();
                 return true;
             }
             KeyCode::Char('h') if !ctrl && !alt => {
@@ -571,7 +573,7 @@ impl App {
     }
 
     /// Reloads open files git changed on disk (clean ones; dirty ones keep their edits).
-    pub(crate) fn reload_open_docs(&mut self) {
+    fn reload_open_docs(&mut self) {
         for d in &mut self.docs {
             let Some(p) = d.path.clone() else { continue };
             let disk = std::fs::read_to_string(&p).ok();

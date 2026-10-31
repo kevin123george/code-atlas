@@ -36,6 +36,8 @@ pub struct Outcome {
     pub turns: u64,
     pub session_id: String,
     pub denials: usize,
+    /// Tokens of the turn: input (incl. cache reads and writes) + output, from `usage`.
+    pub tokens: u64,
 }
 
 fn s(v: &Value, k: &str) -> String {
@@ -91,10 +93,17 @@ pub fn parse_line(line: &str, cwd: &Path) -> Vec<Event> {
             turns: v.get("num_turns").and_then(Value::as_u64).unwrap_or(0),
             session_id: s(&v, "session_id"),
             denials: v.get("permission_denials").and_then(Value::as_array).map_or(0, Vec::len),
+            tokens: usage_tokens(v.get("usage")),
         })),
         _ => {}
     }
     out
+}
+
+/// All tokens in a `usage` object: input, cache writes, cache reads and output.
+fn usage_tokens(u: Option<&Value>) -> u64 {
+    let Some(u) = u else { return 0 };
+    ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"].iter().filter_map(|k| u.get(*k).and_then(Value::as_u64)).sum()
 }
 
 fn content(v: &Value) -> &[Value] {
@@ -185,6 +194,7 @@ mod tests {
         assert!(o.ok);
         assert_eq!((o.subtype.as_str(), o.turns, o.duration_ms, o.denials), ("success", 2, 7497, 0));
         assert!((o.cost - 0.1125078).abs() < 1e-9);
+        assert_eq!(o.tokens, 4 + 12908 + 27939 + 182, "usage: input + cache writes + cache reads + output");
         assert_eq!(ev.len(), 5, "thinking blocks and rate-limit lines are skipped");
     }
 

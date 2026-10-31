@@ -112,7 +112,8 @@ impl Agents {
         Self::with_store(root, store)
     }
 
-    fn with_store(root: PathBuf, store: Option<PathBuf>) -> Agents {
+    /// `store = None`: nothing is read or saved (tests).
+    pub(crate) fn with_store(root: PathBuf, store: Option<PathBuf>) -> Agents {
         let Store { next_id, mut runs } = store
             .as_ref()
             .and_then(|p| std::fs::read_to_string(p).ok())
@@ -180,7 +181,7 @@ impl Agents {
     /// This project's runs, newest first (what the list shows).
     pub fn shown(&self) -> Vec<usize> {
         let root = canonical(&self.root);
-        let mut v: Vec<usize> = (0..self.runs.len()).filter(|&i| canonical(&self.runs[i].cwd) == root).collect();
+        let mut v: Vec<usize> = (0..self.runs.len()).filter(|&i| canonical(self.runs[i].home()) == root).collect();
         v.reverse();
         v
     }
@@ -209,7 +210,7 @@ impl Agents {
         if self.mode_idx == 0 { "default" } else { &self.modes[self.mode_idx] }
     }
 
-    fn select(&mut self, id: Option<u64>) {
+    pub(crate) fn select(&mut self, id: Option<u64>) {
         self.selected = id;
         self.follow = true;
         // Follow-ups default to the run's own mode and agent.
@@ -247,6 +248,72 @@ impl Agents {
         if self.visible && self.cli.is_none() && self.modes.len() == 1 {
             self.cli = Some(cli::probe(self.program.clone()));
         }
+    }
+
+    /// Tests: the program runs start with (a fake `claude`).
+    #[cfg(test)]
+    pub fn set_program(&mut self, p: &str) {
+        self.program = p.into();
+    }
+
+    /// Tests: never read or write `agents.json`.
+    #[cfg(test)]
+    pub fn forget_store(&mut self) {
+        self.store = None;
+    }
+
+    /// `m` when `claude --help` offers that permission mode (never bypassPermissions).
+    pub fn offered_mode(&self, m: &str) -> Option<String> {
+        self.modes.iter().skip(1).find(|x| *x == m).cloned()
+    }
+
+    /// Reads `claude --help` in the background if that hasn't happened yet.
+    pub fn probe_cli(&mut self) {
+        if self.cli.is_none() && self.modes.len() == 1 {
+            self.cli = Some(cli::probe(self.program.clone()));
+        }
+    }
+
+    /// `claude --help` is still being read.
+    pub fn probing(&self) -> bool {
+        self.cli.is_some()
+    }
+
+    pub fn new_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    /// Adds `run` (made with an id from `new_id`) and starts its first turn (mission control,
+    /// ask-an-agent). Returns its id.
+    pub fn start_new(&mut self, run: Run, turn: &Turn) -> u64 {
+        let id = run.id;
+        self.runs.push(run);
+        let program = self.program.clone();
+        let i = self.runs.len() - 1;
+        self.runs[i].start(&program, turn);
+        self.save();
+        id
+    }
+
+    /// A follow-up turn in run `id`; Err says why not.
+    pub fn follow_up(&mut self, id: u64, turn: &Turn) -> Result<(), String> {
+        let i = self.run_index(id).ok_or("That run is gone.")?;
+        let r = &self.runs[i];
+        if r.running() {
+            return Err("This agent is still working. Stop it first, or wait.".into());
+        }
+        if r.session_id.is_none() {
+            return Err("That run has no session to resume: start a new agent.".into());
+        }
+        if r.landed.is_some() {
+            return Err("Its work has landed or was discarded: start a new agent.".into());
+        }
+        let program = self.program.clone();
+        self.runs[i].start(&program, turn);
+        self.save();
+        Ok(())
     }
 
     /// Starts a new run or a follow-up in the selected one. Returns a status message.
@@ -658,7 +725,10 @@ impl App {
         }
         redraw |= a.staff.poll();
         for (id, title, state) in &finished {
-            if !a.visible || a.selected != Some(*id) {
+            // Worktree runs (and anything while mission control is open) are announced by
+            // mission control, with its review / land keys (decision 0015).
+            let worktree = a.run_index(*id).is_some_and(|i| a.runs[i].worktree.is_some());
+            if (!a.visible || a.selected != Some(*id)) && !worktree && !self.mission.open {
                 self.message = Some(format!("Agent \"{}\" {} · Alt+9 shows it", transcript::ellipsize(title, 40), state.label()));
             }
         }
@@ -745,9 +815,14 @@ impl App {
 /// The current file as prompt context: a label for the transcript and the text added to the
 /// prompt (path, selected line numbers and those lines).
 pub fn file_context(d: &Doc, root: &Path) -> Option<(String, String)> {
+    file_context_sel(d, d.selection(), root)
+}
+
+/// [`file_context`] for a given selection (Vim's visual range, mission control's ask).
+pub fn file_context_sel(d: &Doc, sel: Option<(usize, usize)>, root: &Path) -> Option<(String, String)> {
     let path = d.path.as_ref()?;
     let rel = crate::project::search::rel(root, &canonical(path));
-    match d.selection() {
+    match sel {
         Some((s, e)) if e > s => {
             let first = d.rope.char_to_line(s);
             // A selection ending at a line start doesn't include that line.

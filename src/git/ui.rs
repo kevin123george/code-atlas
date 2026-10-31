@@ -48,11 +48,7 @@ pub fn draw_mark(buf: &mut Buffer, x: u16, y: u16, m: Mark) {
 /// Draws the branch just left of the status bar's right part; returns the width used.
 pub fn draw_branch(buf: &mut Buffer, git: &Git, area: Rect, right_w: u16) -> u16 {
     let Some(b) = &git.branch else { return 0 };
-    // With several workspace roots the current repo comes first (decision 0013).
-    let label = match &git.label {
-        Some(l) => format!(" {l} ⎇ {b} ·"),
-        None => format!(" ⎇ {b} ·"),
-    };
+    let label = format!(" ⎇ {b} ·");
     let w = label.chars().count() as u16;
     if right_w + w + 20 > area.width {
         return 0;
@@ -99,8 +95,7 @@ pub fn draw_panel(buf: &mut Buffer, git: &mut Git, area: Rect, focused: bool) ->
     let committing = git.committing();
     let p = &mut git.panel;
     let list_focus = focused && p.field == Field::List;
-    let repo = git.label.as_ref().map(|l| format!(" {l} ·")).unwrap_or_default();
-    let head = format!("{repo} Changes {} · {} ticked", git.entries.len(), p.checked.len());
+    let head = format!(" Changes {} · {} ticked", git.entries.len(), p.checked.len());
     put(buf, list.x, list.y, &head, list.width, Style::new().fg(if list_focus { ACCENT } else { TEXT_2 }).add_modifier(Modifier::BOLD));
     let rows_h = list.height.saturating_sub(1) as usize;
     if p.cursor < p.scroll {

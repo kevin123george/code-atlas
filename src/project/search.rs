@@ -1,5 +1,4 @@
-//! Background work over the whole project (every root of a workspace): the file list for the
-//! finder, and find in files.
+//! Background work over the whole project: the file list for the finder, and find in files.
 //! Both run on their own threads and stream results through channels; the UI drains them on
 //! every tick, so the editor stays responsive on big trees. Dropping a [`Job`] cancels it.
 
@@ -59,51 +58,29 @@ pub fn rel(root: &Path, p: &Path) -> String {
 }
 
 /// Streams every (not ignored) file under `root` as a relative path, in batches.
-#[cfg(test)]
 pub fn index_files(root: PathBuf) -> Job<Vec<String>> {
-    index_roots(vec![(String::new(), root)])
-}
-
-/// `prefix/rel` (just `rel` without a prefix): a workspace root's label in front.
-fn prefixed(prefix: &str, rel: String) -> String {
-    if prefix.is_empty() {
-        rel
-    } else {
-        format!("{prefix}/{rel}")
-    }
-}
-
-/// Streams every (not ignored) file under each root as `prefix/relative path` (one root with an
-/// empty prefix = plain relative paths), in batches, root after root.
-pub fn index_roots(roots: Vec<(String, PathBuf)>) -> Job<Vec<String>> {
     spawn(move |tx, cancel| {
         let count = AtomicUsize::new(0);
-        for (prefix, root) in roots {
-            if cancel.load(Ordering::Relaxed) || count.load(Ordering::Relaxed) >= MAX_FILES {
-                break;
-            }
-            walker(&root).threads(num_threads()).build_parallel().run(|| {
-                let mut out = Batch { tx: tx.clone(), items: Vec::new() };
-                let root = root.clone();
-                let prefix = prefix.clone();
-                let count = &count;
-                Box::new(move |entry| {
-                    if cancel.load(Ordering::Relaxed) || count.load(Ordering::Relaxed) >= MAX_FILES {
-                        return WalkState::Quit;
-                    }
-                    if let Ok(e) = entry {
-                        if e.file_type().is_some_and(|t| t.is_file()) {
-                            out.items.push(prefixed(&prefix, rel(&root, e.path())));
-                            count.fetch_add(1, Ordering::Relaxed);
-                            if out.items.len() >= 512 && !out.flush() {
-                                return WalkState::Quit;
-                            }
+        walker(&root).threads(num_threads()).build_parallel().run(|| {
+            let mut out = Batch { tx: tx.clone(), items: Vec::new() };
+            let root = root.clone();
+            let count = &count;
+            Box::new(move |entry| {
+                if cancel.load(Ordering::Relaxed) || count.load(Ordering::Relaxed) >= MAX_FILES {
+                    return WalkState::Quit;
+                }
+                if let Ok(e) = entry {
+                    if e.file_type().is_some_and(|t| t.is_file()) {
+                        out.items.push(rel(&root, e.path()));
+                        count.fetch_add(1, Ordering::Relaxed);
+                        if out.items.len() >= 512 && !out.flush() {
+                            return WalkState::Quit;
                         }
                     }
-                    WalkState::Continue
-                })
-            });
-        }
+                }
+                WalkState::Continue
+            })
+        });
     })
 }
 
@@ -147,11 +124,6 @@ pub struct Hit {
 /// Finds `query` in every text file under `root`. Smart case: lowercase queries ignore case.
 /// Hits of one file arrive together, in line order.
 pub fn find_in_files(root: PathBuf, query: String) -> Job<Vec<Hit>> {
-    find_in_roots(vec![(String::new(), root)], query)
-}
-
-/// [`find_in_files`] over several roots, root after root; hit paths are `prefix/relative path`.
-pub fn find_in_roots(roots: Vec<(String, PathBuf)>, query: String) -> Job<Vec<Hit>> {
     spawn(move |tx, cancel| {
         let hits = AtomicUsize::new(0);
         let ignore_case = !query.chars().any(char::is_uppercase);
@@ -159,41 +131,35 @@ pub fn find_in_roots(roots: Vec<(String, PathBuf)>, query: String) -> Job<Vec<Hi
         if needle.is_empty() {
             return;
         }
-        for (prefix, root) in roots {
-            if cancel.load(Ordering::Relaxed) || hits.load(Ordering::Relaxed) >= MAX_HITS {
-                break;
-            }
-            walker(&root).threads(num_threads()).build_parallel().run(|| {
-                let tx = tx.clone();
-                let root = root.clone();
-                let prefix = prefix.clone();
-                let needle = needle.clone();
-                let hits = &hits;
-                Box::new(move |entry| {
-                    if cancel.load(Ordering::Relaxed) || hits.load(Ordering::Relaxed) >= MAX_HITS {
+        walker(&root).threads(num_threads()).build_parallel().run(|| {
+            let tx = tx.clone();
+            let root = root.clone();
+            let needle = needle.clone();
+            let hits = &hits;
+            Box::new(move |entry| {
+                if cancel.load(Ordering::Relaxed) || hits.load(Ordering::Relaxed) >= MAX_HITS {
+                    return WalkState::Quit;
+                }
+                let Ok(e) = entry else { return WalkState::Continue };
+                if !e.file_type().is_some_and(|t| t.is_file()) {
+                    return WalkState::Continue;
+                }
+                let found = search_file(e.path(), &needle, ignore_case);
+                if !found.is_empty() {
+                    let path = rel(&root, e.path());
+                    let n = found.len();
+                    let batch: Vec<Hit> = found.into_iter().map(|mut h| {
+                        h.path = path.clone();
+                        h
+                    }).collect();
+                    hits.fetch_add(n, Ordering::Relaxed);
+                    if tx.send(batch).is_err() {
                         return WalkState::Quit;
                     }
-                    let Ok(e) = entry else { return WalkState::Continue };
-                    if !e.file_type().is_some_and(|t| t.is_file()) {
-                        return WalkState::Continue;
-                    }
-                    let found = search_file(e.path(), &needle, ignore_case);
-                    if !found.is_empty() {
-                        let path = prefixed(&prefix, rel(&root, e.path()));
-                        let n = found.len();
-                        let batch: Vec<Hit> = found.into_iter().map(|mut h| {
-                            h.path = path.clone();
-                            h
-                        }).collect();
-                        hits.fetch_add(n, Ordering::Relaxed);
-                        if tx.send(batch).is_err() {
-                            return WalkState::Quit;
-                        }
-                    }
-                    WalkState::Continue
-                })
-            });
-        }
+                }
+                WalkState::Continue
+            })
+        });
     })
 }
 

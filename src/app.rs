@@ -73,8 +73,8 @@ pub struct App {
     pub hints: crate::hints::Hints,
     /// Git view over the editor area: review, log, branches, blame (`src/git/view.rs`).
     pub git_view: crate::git::view::GitView,
-    /// Workspace: current repo, Repos popup, every root's status (`src/workspace/`).
-    pub workspace: crate::workspace::repos::WsState,
+    /// Mission control: agents in worktrees, ask-an-agent, presence (`src/mission/`).
+    pub mission: crate::mission::Mission,
     /// The last editor key was undo or redo: a macOS Option+Z character (`Ω`) now redoes
     /// (see `mackeys::option_redo`).
     undo_chain: bool,
@@ -82,12 +82,9 @@ pub struct App {
 
 impl App {
     pub fn new(paths: Vec<PathBuf>) -> anyhow::Result<Self> {
-        // One folder, several, a workspace file, or a folder of repos (decision 0013).
-        let opened = crate::workspace::from_args(paths);
-        let (paths, as_project, note) = (opened.files, opened.as_project, opened.note);
-        opened.ws.apply_excludes();
-        crate::lsp::config::init(Some(&opened.ws.home));
-        let mut project = crate::project::Project::with_workspace(opened.ws, as_project);
+        let (root, paths, as_project) = crate::project::split_args(paths);
+        crate::lsp::config::init(Some(&root));
+        let mut project = crate::project::Project::new(root, as_project);
         let mut docs = Vec::new();
         for p in &paths {
             project.note_opened(p);
@@ -101,14 +98,14 @@ impl App {
         let settings = crate::config::Settings::load(if cfg!(test) { None } else { crate::config::settings_path() }.as_deref());
         let mut lsp = crate::lsp::Lsp::default();
         lsp.auto = settings.autocomplete;
-        let mut app = App {
+        Ok(App {
             agents: crate::agents::Agents::new(project.root.clone()),
             dock,
             project,
             docs,
             active: 0,
             prompt: None,
-            message: note.or(Some("Ctrl+S save · Ctrl+T search everywhere · Ctrl+P file · Alt+1 project · Alt+F find in files · Ctrl+Q quit".into())),
+            message: Some("Ctrl+S save · Ctrl+T search everywhere · Ctrl+P file · Alt+1 project · Alt+F find in files · Ctrl+Q quit".into()),
             quit: false,
             armed: None,
             clip: Clip::default(),
@@ -121,11 +118,9 @@ impl App {
             lsp,
             hints: crate::hints::Hints::load(),
             git_view: crate::git::view::GitView::default(),
-            workspace: crate::workspace::repos::WsState::default(),
+            mission: crate::mission::Mission::default(),
             undo_chain: false,
-        };
-        app.workspace_init();
-        Ok(app)
+        })
     }
 
     /// Turns Vim mode on or off.
@@ -168,14 +163,14 @@ impl App {
                 let armed = self.armed.take();
                 let chain = std::mem::take(&mut self.undo_chain);
                 let before = self.active;
-                if self.dock_key(k) {
+                if self.mission_key(k) {
+                    // Mission control / ask an agent (src/mission/): first while open.
+                    self.after_ide(before);
+                } else if self.dock_key(k) {
                     // Handled by the dock (terminal, commit panel, diff view).
                     self.after_ide(before);
                 } else if self.prompt.is_some() {
                     self.prompt_key(k);
-                    self.after_ide(before);
-                } else if self.workspace_key(k) {
-                    // Ctrl+O and the Repos popup (src/workspace/).
                     self.after_ide(before);
                 } else if self.git_view_key(k) {
                     // Handled by the Git view (src/git/view.rs): review, log, branches.
@@ -203,7 +198,7 @@ impl App {
             }
             Event::Paste(text) => {
                 self.undo_chain = false;
-                if self.workspace_paste(&text) || self.dock_paste(&text) || self.agents_paste(&text) || self.git_view_paste(&text) {
+                if self.mission_paste(&text) || self.dock_paste(&text) || self.agents_paste(&text) || self.git_view_paste(&text) {
                     return;
                 }
                 if self.vim.as_mut().is_some_and(|v| v.paste(&text)) {
@@ -223,7 +218,7 @@ impl App {
                 self.undo_chain = false;
                 let before = self.active;
                 let hints_before = self.hints_before();
-                if !self.workspace_mouse(m) && !self.dock_mouse(m) && !self.git_view_mouse(m) && !self.agents_mouse(m) && !self.project_mouse(m) {
+                if !self.mission_mouse(m) && !self.dock_mouse(m) && !self.git_view_mouse(m) && !self.agents_mouse(m) && !self.project_mouse(m) {
                     self.mouse(m);
                 }
                 self.after_ide(before);
