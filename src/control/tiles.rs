@@ -146,7 +146,12 @@ fn workspace(app: &App) -> Tile {
         }
     }
     rows.push(row("project folder", hooks::short_path(&app.project.root), Tone::Muted, Act::Tree));
-    let summary = format!("{} · {}", plural(roots.len(), "repo", "repos"), if dirty == 0 { "clean".into() } else { format!("{dirty} with changes") });
+    let repos = c.repos.iter().filter(|r| r.branch.is_some()).count();
+    let summary = if repos == 0 && !c.repos.is_empty() {
+        "no git repository".to_string()
+    } else {
+        format!("{} · {}", plural(roots.len(), "repo", "repos"), if dirty == 0 { "clean".into() } else { format!("{dirty} with changes") })
+    };
     Tile { id: TileId::Workspace, glyph: "◇", title: "WORKSPACE", summary, tone: if dirty == 0 { Tone::Good } else { Tone::Warn }, rows }
 }
 
@@ -164,7 +169,7 @@ fn agents(app: &App) -> Tile {
     let midnight = hooks::local_midnight(c.utc_offset);
     let running = a.runs.iter().filter(|r| r.running()).count();
     let finished = a.runs.iter().filter(|r| !r.running() && r.updated >= midnight).count();
-    let cost: f64 = a.runs.iter().filter(|r| r.updated >= midnight).map(|r| r.cost).sum();
+    let cost: f64 = a.runs.iter().filter(|r| r.updated >= midnight).map(|r| r.cost).sum::<f64>() + 0.0; // an empty sum is -0.0
     let attention: Vec<u64> = a.runs.iter().filter(|r| needs_attention(r)).map(|r| r.id).collect();
     let mut rows = vec![row(
         format!("● {running} running · {finished} done today"),
