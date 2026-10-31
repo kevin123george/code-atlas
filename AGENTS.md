@@ -8,6 +8,9 @@ An internal Atelier Astra tool: a terminal code editor that feels like IntelliJ 
 shortcuts) with an optional Vim mode, project view, code smarts over LSP, git (with a live review of what agents
 changed), a terminal pane, and a panel to run and watch Claude agents. Binary: `catlas`.
 `catlas <dir>` opens a project (no arguments = the current folder); `catlas <dir> file …` also opens files.
+**Workspaces** (decision 0013): `catlas dir1 dir2 …`, `catlas x.catlas.toml`, or `catlas ~/Projects` (a folder
+holding 2+ repos) open several roots at once; `--single` opens such a folder as one; `catlas -w [n|name]` lists /
+reopens recent workspaces. See **Keys (workspaces)**.
 
 ## Where it runs
 Locally in a terminal on the Mac and the laptop (`catlas [--vim] [dir] [file ...]`). No server. Best in a terminal with the
@@ -127,7 +130,7 @@ highlighting only.
   editor + tree area (after `draw_over_editor`) and the blame columns in `draw_text` (`ui.rs`), Ctrl+D in
   `agents_key`, `Baseline::take` in `Run::start`, the stat jobs in `agents_tick`.
 - `src/hints/` – shortcut helper (key-hints, decision 0008): `mod.rs` `Hints` state (on, kitty, tip), `context()`
-  (what has focus → one of 29 `Ctx`), the key-label parser, Key Promoter (`hints_key`, `hints_mouse`); `table.rs`
+  (what has focus → one of 33 `Ctx`), the key-label parser, Key Promoter (`hints_key`, `hints_mouse`); `table.rs`
   **the hint rows per context, as data** (+ fallbacks and tip keys); `ui.rs` placement (bottom right, top right
   when the cursor line is under it) and the glass drawing; `tests.rs` the binding check and drawing tests.
   Hooks elsewhere: `App.hints`, `hints_key` first in `App::handle`, `hints_before`/`hints_mouse` around the mouse
@@ -143,6 +146,15 @@ highlighting only.
   `app.mission_tick()` in the main loop; `mission::ui::draw` (after the Git view), the ticker in `draw_status`,
   `✳` in `draw_tabs` and the tree (`project/ui.rs`), line-number colour in `draw_text`; `Run` fields `worktree`,
   `landed`, `tokens`, `pulse`; `Agents::start_new` / `follow_up`; `open_git_view_in` + `review_run` on a worktree.
+- `src/workspace/` – workspaces (decision 0013): `mod.rs` `Workspace` (roots, labels, colours, `rel`/`abs`/`show`
+  for `label/path`, `@label` scoping, excludes used by `tree::walker`), opening (`from_args`, workspace files,
+  nested repos), recent list (`workspaces.toml`); `status.rs` background `git status` of every root (pool of 4,
+  10 s); `repos.rs` `WsState` (`App.workspace`: current repo, the other roots' `Git`s, Repos popup keys/mouse,
+  add/remove root, fetch/pull all plans + runs, `workspace_tick`); `ui.rs` popup, tree badges, tree colours;
+  `tests.rs`. Hooks elsewhere: `workspace_key` after the prompt in `App::handle` (+ paste, mouse first),
+  `from_args` + `workspace_init` in `App::new`, `workspace_tick` in `App::tick`, `Project.ws` (+ `abs`/`show`,
+  `index_roots`/`find_in_roots`, `Tree::new_multi`/`collapse_all`), `Git.label`/`project_dir`, `o` in the Git
+  view, `draw_popup` + `marks` in `ui.rs`, `-w`/`--single` in `main.rs`, 4 hint contexts.
 - `src/config.rs` – `settings.toml` (`hints = true`, `autocomplete = true`) in the config folder: load (defaults on any
   problem, field by field), save one key.
 - `src/mackeys.rs` – macOS keys terminals mangle (decision 0010): Cmd chords with SUPER → Ctrl twins
@@ -238,6 +250,21 @@ used where the real key works shows "Tip: key" at its top for 3 s.
 | typing in the focused tree | speed search: jumps to the best matching name (closed folders too, via the index), ↑↓ next/previous match, Backspace, Esc clears |
 | while a popup row is selected | the tree (if shown) opens down to that file and selects it; Esc puts it back, opening keeps it |
 | in popups | Backspace, Ctrl+Backspace / Ctrl+H word, Ctrl+U clear, Esc close; mouse click opens a row, wheel scrolls |
+
+## Keys (workspaces)
+Decision 0013. With several roots the tree has one top row per repo (badge: `⎇branch ●changed ↑ahead ↓behind`),
+paths show as `repo › path`, and the status bar starts with the current repo (`cashflow ⎇ main`).
+| Key | Does |
+|---|---|
+| **Alt+O** (also `o` in the Git view; Ctrl+O is mission control) | Repos popup: every root's branch, sync, changed files +/−, last commit; summary of all repos on top |
+| in it | ↑↓ j k · **Enter** make current (Commit panel, Git view, status bar; shows it in the tree) · **g / l / c** its changes / log / Commit panel · **F / U** fetch / pull (ff-only) all, **f / u** the selected one, each after a question (y / n) · `/` filter · `x` only repos with changes · **a** add a folder as a root · **d** / Del remove one (files untouched) · **w** recent workspaces (Enter opens) · r / F5 refresh · Esc |
+| `@repo text` | in Go to File, Recent, Find in Files, Search Everywhere: only that repo (a label or a unique start, then a space) |
+| `-` in the tree | collapse all (Ctrl+minus too with the kitty protocol) |
+| Ctrl+T on a repo row | Search Everywhere in that repo |
+- The current repo follows the editor: opening a file of another repo makes it current; a pick in the popup
+  stays until the editor moves to another repo. Each repo keeps its own ticks and commit message.
+- Workspace file: `*.catlas.toml` or `<dir>/.code-atlas/workspace.toml` with `name`, `exclude = [...]`,
+  `roots = [...]` and/or `[[root]] path/label/color` (see decision 0013).
 
 ## Keys (code smarts)
 | Key | Does |
@@ -442,6 +469,7 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 
 ## Decisions
 `docs/decisions/0015-mission-control.md` – mission control: agents in their own worktrees (`<repo>-wt/<slug>`, acceptEdits there, never bypass), cards with activity / cost / tokens / changes / sparkline, land = commit leftovers + ff / merge / rebase behind a question (never push or force; conflicts aborted), remove refuses dirty, discard after a question, ask-an-agent from the code (Ctrl+U), presence markers + ticker, OSC 9 / bell, 5 hint contexts, one repo per agent.
+`docs/decisions/0013-workspaces.md` – workspaces: several roots (`label › path`), opening rules (folders, `*.catlas.toml`, `.code-atlas/workspace.toml`, folder of repos, `--single`), `@repo` scoping, multi-root tree + badges, background status of every repo, current repo follows the editor, Repos popup (Alt+O), fetch/pull all behind a question, recent workspaces (`-w`), LSP per root unchanged.
 `docs/decisions/0012-git-view.md` – Git view: review of working tree / agent run / commit as one live document (1 s refresh, fingerprint), Ctrl+L / Alt+8, single-letter keys, hunk stage/unstage via `git apply --cached`, partial commits from the index, revert with confirm + byte-level undo, run snapshots (temp index, user's index untouched) + Ctrl+D, log with own lane graph and ✳ for Claude commits, blame with `--contents -`, branches popup, push/pull/fetch behind a question.
 `docs/decisions/0011-autocomplete.md` – completion as you type (100 ms pause, server trigger characters, not in comments/strings/prose, newest answer only), Ctrl+J / Ctrl+@ next to Ctrl+Space (macOS takes it), Enter on a typed-out word = new line, word completion from open buffers (alone or under few server items), `autocomplete` setting.
 `docs/decisions/0010-mac-undo-and-xml.md` – Cmd+Z/Cmd chords via SUPER (editor only), Ω-after-undo redo, Alt+Shift+Z, "Nothing to undo", no-op edits make no undo step, XML/DTD highlighting (tree-sitter-xml), per-line `<!-- -->` comments, lemminx entry.
@@ -466,6 +494,16 @@ discard on scratch repos, two fake agents in worktrees through land + discard, a
 presence, notify, sparkline; 5 new binding-test contexts), e2e `scenarios/mission_control.sh` (two parallel
 agents + land + discard + bell, presence markers + colours, ask from a selection). One real run: $0.11, landed.
 Not done: permission answers mid-run, landing several at once, per-agent cost limits, conflict UI.
+Workspaces done 2026-10-28 (track A, decision 0013, see Keys (workspaces)): several repos at once (`catlas a b`,
+`*.catlas.toml`, a folder of repos such as `~/Projects` → 16 roots), tree with a top row and badge per repo,
+collapse all, `repo › path` everywhere, `@repo` search scoping, Go to File / Recent / Find in Files / Search
+Everywhere across roots, per-repo Commit panel, Git view and gutter marks with the current repo following the
+editor, Repos popup (Alt+O) with the all-repos overview, add / remove roots, recent workspaces, fetch / pull of
+all repos behind a question. Checked on `~/Projects` (read-only, scratch config): 16 repos, statuses in < 3 s.
+Tests: unit `src/workspace/tests.rs` (paths, opening, files, recent, excludes, tree, cross-repo search, statuses
++ fetch against a local bare repo, plans) and 4 binding-test contexts (309 unit), e2e
+`scenarios/workspaces.sh` (6 scenarios, 69 in all). Not done: loose folders of a folder-of-repos, per-repo
+agents/terminal (track C), persistent index (track B), commit/push across repos.
 Git view done 2026-10-26 (git-view, decision 0012, see Keys (git view)): Ctrl+L / Alt+8 opens a view over the
 editor with **Changes** (one live document of every change: unstaged, untracked, staged; syntax colours, word
 highlights, side by side from 150 columns, file list left or on top at 80 columns; refreshes every second while

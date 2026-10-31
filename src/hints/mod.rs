@@ -118,6 +118,15 @@ pub fn context(app: &App) -> Ctx {
     if app.prompt.is_some() {
         return Ctx::Prompt;
     }
+    if let Some(p) = &app.workspace.popup {
+        use crate::workspace::repos::Mode as M;
+        return match p.mode {
+            M::List => Ctx::Repos,
+            M::Filter | M::Add => Ctx::ReposInput,
+            M::Confirm => Ctx::ReposConfirm,
+            M::Workspaces => Ctx::Workspaces,
+        };
+    }
     if app.git_view_focused() {
         let v = &app.git_view;
         return if v.confirm.is_some() {

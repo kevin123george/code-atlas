@@ -92,8 +92,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let prompt_cursor = draw_status(buf, app, status);
     let lsp_cursor = app.draw_lsp_popups(f.buffer_mut(), cursor, prompt_cursor.is_some(), area);
     let popup_cursor = crate::project::ui::draw_popup(f.buffer_mut(), &mut app.project, area);
+    let repos_cursor = crate::workspace::ui::draw_popup(f.buffer_mut(), app, area);
 
-    if let Some(p) = mission_cursor.or(popup_cursor).or(lsp_cursor).or(prompt_cursor).or(dock_cursor).or(view_cursor).or(panel_cursor).or(cursor) {
+    if let Some(p) = mission_cursor.or(repos_cursor).or(popup_cursor).or(lsp_cursor).or(prompt_cursor).or(dock_cursor).or(view_cursor).or(panel_cursor).or(cursor) {
         f.set_cursor_position(p);
     }
 }
@@ -102,6 +103,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 pub fn block_cursor(app: &App) -> bool {
     app.prompt.is_none()
         && app.project.popup.is_none()
+        && app.workspace.popup.is_none()
         && !app.project.focus_tree
         && !app.dock.has_focus()
         && !app.git_view.open
@@ -156,9 +158,10 @@ fn draw_text(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
     let follow = app.follow;
     let diags = app.diag_spans();
     let d = &mut app.docs[app.active];
-    let marks = app.dock.git.marks(d.path.as_deref());
     // Lines an agent changed this session: line numbers in its colour (decision 0015).
     let agent_lines = app.mission.lines.get(d.path.as_deref());
+    // The editor file's own repo, also when another workspace root is current.
+    let marks = crate::workspace::repos::marks(&app.dock.git, &app.workspace, d.path.as_deref());
     // Blame (git view `b`): its own columns left of the line numbers.
     let blame = app.git_view.blames.get(d.path.as_deref()).filter(|_| area.width > crate::git::blame::WIDTH + 20);
     let blame_x = area.x;

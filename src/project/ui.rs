@@ -29,7 +29,9 @@ pub fn draw_sidebar(buf: &mut Buffer, app: &mut App, area: Rect) -> Rect {
     let focused = p.focus_tree;
     let head = Style::new().fg(if focused { ACCENT } else { TEXT_2 }).bg(SURFACE_1).add_modifier(Modifier::BOLD);
     if p.tree.speed.is_empty() {
-        buf.set_stringn(side.x, side.y, " Project", inner_w as usize, head);
+        // A workspace (decision 0013) names itself and its root count.
+        let title = if p.ws.multi() { format!(" Workspace · {} ({})", p.ws.name, p.ws.roots.len()) } else { " Project".to_string() };
+        buf.set_stringn(side.x, side.y, title, inner_w as usize, head);
     } else {
         // Speed search: the typed letters replace the title; red when nothing matches.
         let found = p.tree.speed_match(p.tree.selected).is_some();
@@ -45,6 +47,8 @@ pub fn draw_sidebar(buf: &mut Buffer, app: &mut App, area: Rect) -> Rect {
     let git = &app.dock.git;
     // Files agents are writing now: ✳ in the agent's colour at the row's end (decision 0015).
     let editing = crate::mission::presence::editing(&app.agents);
+    let statuses = &app.workspace.status;
+    let ws = &p.ws;
     let rows_h = side.height.saturating_sub(1) as usize;
     let t = &mut p.tree;
     if t.follow {
@@ -72,7 +76,7 @@ pub fn draw_sidebar(buf: &mut Buffer, app: &mut App, area: Rect) -> Rect {
             ("  ", Style::new().fg(TEXT_2).bg(bg))
         };
         // Git status colours (M5): modified blue, new green.
-        let name_style = match crate::git::ui::tree_color(git, &n.path, n.is_dir) {
+        let name_style = match crate::workspace::ui::tree_color(git, statuses, ws.multi(), &n.path, n.is_dir) {
             Some(c) if active.as_deref() != Some(n.path.as_path()) => name_style.fg(c),
             _ => name_style,
         };
@@ -81,8 +85,19 @@ pub fn draw_sidebar(buf: &mut Buffer, app: &mut App, area: Rect) -> Rect {
             continue;
         }
         buf.set_string(side.x + indent as u16, y, arrow, Style::new().fg(MUTED).bg(bg));
-        let room = max - indent - 2;
+        let mut room = max - indent - 2;
         let x0 = side.x + (indent + 2) as u16;
+        // A workspace root: its colour, and branch / changes / ahead / behind on the right.
+        let root = (n.depth == 0 && ws.multi()).then(|| ws.roots.iter().find(|r| r.path == n.path)).flatten();
+        let name_style = match root {
+            Some(r) => {
+                let parts = crate::workspace::ui::badge(statuses.get(&r.path));
+                let stop = crate::workspace::ui::draw_badge(buf, x0, side.x + inner_w, y, &parts, bg, n.name.chars().count() as u16);
+                room = stop.saturating_sub(x0) as usize;
+                name_style.fg(r.color)
+            }
+            None => name_style,
+        };
         if t.speed.is_empty() {
             let agent = if n.is_dir { None } else { editing.get(&n.path).copied() };
             let room = if agent.is_some() { room.saturating_sub(2) } else { room };
@@ -139,9 +154,14 @@ pub fn draw_popup(buf: &mut Buffer, p: &mut Project, area: Rect) -> Option<Posit
     p.popup_rect = r;
     Clear.render(r, buf);
     let status = status_line(p);
+    let input = p.popup.as_ref().map_or("", |x| x.input.as_str());
     let title = match (&p.quick.scope, kind) {
-        (Some(scope), PopupKind::Quick) => format!(" {} · in {scope}/ ", kind.title()),
-        _ => format!(" {} ", kind.title()),
+        (Some(scope), PopupKind::Quick) => format!(" {} · in {}/ ", kind.title(), p.ws.show(scope)),
+        // `@repo …` (decision 0013).
+        _ => match p.ws.repo_query(input.trim_start()).0 {
+            Some(r) => format!(" {} · in {r} ", kind.title()),
+            None => format!(" {} ", kind.title()),
+        },
     };
     let bottom = if kind == PopupKind::Quick {
         " ↑↓ select · Enter open · Tab files/text · Alt+F1 tree · Esc "
@@ -383,8 +403,24 @@ fn draw_match(buf: &mut Buffer, p: &Project, i: usize, r: Rect, bg: ratatui::sty
     if name_start > 0 {
         x = put(buf, x, r.y, ' ', end, Style::new().bg(bg));
         x = put(buf, x, r.y, ' ', end, Style::new().bg(bg));
+        // Several roots: `label › folder`, the label in its root's colour.
+        let label = if p.ws.multi() { chars.iter().position(|&c| c == '/') } else { None };
+        let color = label.and_then(|l| p.ws.label_index(&chars[..l].iter().collect::<String>())).map(|i| p.ws.roots[i].color);
+        let label = label.filter(|_| color.is_some());
         for (k, &c) in chars.iter().enumerate().take(name_start - 1) {
-            let st = if hit(k) { Style::new().fg(ACCENT) } else { Style::new().fg(MUTED) };
+            if Some(k) == label {
+                for c in [' ', '›', ' '] {
+                    x = put(buf, x, r.y, c, end, Style::new().fg(MUTED).bg(bg));
+                }
+                continue;
+            }
+            let st = if hit(k) {
+                Style::new().fg(ACCENT)
+            } else if label.is_some_and(|l| k < l) {
+                Style::new().fg(color.unwrap_or(MUTED))
+            } else {
+                Style::new().fg(MUTED)
+            };
             x = put(buf, x, r.y, c, end, st.bg(bg));
         }
     }
@@ -394,7 +430,7 @@ fn draw_match(buf: &mut Buffer, p: &Project, i: usize, r: Rect, bg: ratatui::sty
 fn draw_hit(buf: &mut Buffer, p: &Project, i: usize, r: Rect, bg: ratatui::style::Color) {
     let h = &p.hits[i];
     let end = r.right();
-    let loc = format!("{}:{}", h.path, h.line + 1);
+    let loc = format!("{}:{}", p.ws.show(&h.path), h.line + 1);
     // Keep the location to at most 45% of the row, cutting its front.
     let max_loc = (r.width as usize * 45 / 100).max(10);
     let n = loc.chars().count();

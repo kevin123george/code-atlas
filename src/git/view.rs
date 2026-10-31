@@ -184,7 +184,7 @@ impl App {
         if let Some(r) = self.dock.git.root.clone() {
             return Some(r);
         }
-        super::toplevel(&self.project.root)
+        super::toplevel(&self.repo_dir())
     }
 
     /// Opens (or focuses) the view; `scope` replaces the review's scope when given.
@@ -420,6 +420,11 @@ impl App {
                 self.toggle_blame();
                 return true;
             }
+            // The Repos popup: switch repo, all repos' changes (decision 0013).
+            KeyCode::Char('o') if !ctrl && !alt => {
+                self.open_repos();
+                return true;
+            }
             KeyCode::Char('h') if !ctrl && !alt => {
                 self.file_history();
                 return true;
@@ -573,7 +578,7 @@ impl App {
     }
 
     /// Reloads open files git changed on disk (clean ones; dirty ones keep their edits).
-    fn reload_open_docs(&mut self) {
+    pub(crate) fn reload_open_docs(&mut self) {
         for d in &mut self.docs {
             let Some(p) = d.path.clone() else { continue };
             let disk = std::fs::read_to_string(&p).ok();

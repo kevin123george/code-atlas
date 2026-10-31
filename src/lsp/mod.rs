@@ -603,7 +603,7 @@ impl App {
                 self.lsp.popup = Some(Popup::Picker(p));
             }
             Pending::Symbols { seq } => {
-                let root = self.project.root.clone();
+                let ws = self.project.ws.clone();
                 let Some(Popup::Picker(p)) = &mut self.lsp.popup else { return };
                 if p.kind != PickKind::Symbols || p.seq != seq {
                     return;
@@ -613,7 +613,7 @@ impl App {
                     let Some(path) = s.pointer("/location/uri").and_then(Value::as_str).and_then(uri_to_path) else { continue };
                     let pos = s.pointer("/location/range/start").and_then(|p| serde_json::from_value(p.clone()).ok()).unwrap_or_default();
                     let container = s.get("containerName").and_then(Value::as_str).unwrap_or("");
-                    let file = rel(&root, &path);
+                    let file = ws.show(&ws.rel(&path));
                     let detail = if container.is_empty() { format!("{file}:{}", pos_line(pos)) } else { format!("{container} · {file}:{}", pos_line(pos)) };
                     items.push(PickItem {
                         kind: symbol_kind(s.get("kind").and_then(Value::as_u64).unwrap_or(0)),
@@ -1065,8 +1065,9 @@ impl App {
 
     // ---- navigation pickers ------------------------------------------------------------------
 
+    /// `p` relative to the project root when inside it (`repo › path` in a workspace).
     fn rel_path(&self, p: &Path) -> String {
-        rel(&self.project.root, p)
+        self.project.show(p)
     }
 
     /// Picker rows for locations: the line's text, and `file:line`.
@@ -1525,12 +1526,6 @@ fn completion_adds_nothing(p: &Popup, cursor: usize, rope: &ropey::Rope) -> bool
     let Popup::Completion { items, shown, sel, start, .. } = p else { return false };
     let Some(it) = shown.get(*sel).map(|&i| &items[i]) else { return false };
     cursor >= *start && it.adds_nothing(&rope.slice(*start..cursor).to_string())
-}
-
-/// `p` relative to the project root when inside it.
-fn rel(root: &Path, p: &Path) -> String {
-    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    p.strip_prefix(&root).unwrap_or(p).display().to_string()
 }
 
 fn pos_line(p: Position) -> u32 {
