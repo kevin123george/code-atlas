@@ -81,7 +81,7 @@ highlighting only.
   Hooks elsewhere: `App.vim` + `App::key` (Vim first, then `idea_key`), `App::vim_effect`, `after_ide` calls after
   prompts/mouse/paste/project keys; `ui::block_cursor` + mode badge, showcmd and command line in the status bar;
   `Doc::begin_group`/`end_group`/`replace`/`indent`/`set_want_col`/`content_lines` helpers in `doc.rs`.
-- `src/syntax/` – code smarts without a server (M3): `mod.rs` `Lang` (detection by name/extension/`#!`, status-bar
+- `src/syntax/` – code smarts without a server (M3): `markdown.rs` inline styling + code blocks by language, parsed for visible lines (decision 0019); `enter.rs` per-language Enter, pure; `mod.rs` `Lang` (detection by name/extension/`#!`, status-bar
   name, comment token, LSP id), capture name → `Token`, per-doc `Syntax` (parser + tree, incremental reparse,
   visible-lines cache); `comment.rs` Ctrl+/ toggling. Colours: `ui::theme::token_style`.
 - `src/lsp/` – LSP client (M3, extended by lsp-more): `mod.rs` `Lsp` state + `impl App` (sync to the main + `also`
@@ -296,6 +296,9 @@ paths show as `repo › path`, and the status bar starts with the current repo (
 | **F1** | quick documentation (hover). IDEA's Ctrl+Q is quit here. ↑↓ scroll, Esc or any key closes |
 | Shift+F6 | rename symbol (prompt pre-filled with the word); files changed elsewhere open as unsaved tabs |
 | Ctrl+Alt+L | reformat file (server's formatter, e.g. rustfmt) |
+| Ctrl+Alt+O | organize imports (the server's, e.g. jdtls) |
+| Enter | by language (decision 0019): Markdown continues lists, tasks and quotes (an empty item ends the list; not in code blocks), YAML indents after a key and aligns under `- key:`, shell indents after `then` / `do` / `case … in` and brings `fi` / `done` / `esac` / `else` back, `/**` opens a comment and ` * ` carries on, an opener at the end of a line indents |
+| Tab, Ctrl+Alt+L | one step = the file's own indent width (2, 3, 4 or 8), else 2 for YAML, JSON, TOML, shell and Markdown, 4 elsewhere |
 | Alt+Enter | quick fixes / intentions (code actions) at the cursor, preferred first |
 Diagnostics: ● in the gutter (red error, yellow warning, blue info; hints hidden), coloured underline, and the
 message in the status bar when the cursor is on it.
@@ -433,8 +436,10 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 - Find in files honours `.gitignore` even outside git repos (like `rg --no-require-git`), so e.g. a `.venv`
   listed in a non-git folder's `.gitignore` is skipped; plain `rg` would search it.
 - Highlighting: Rust's bundled query tags integer literals `@constant.builtin`; `syntax::refine` recolours numeric
-  node kinds as numbers. TS/TSX highlighting = the TypeScript query + JavaScript's (+ JSX); Markdown uses the block
-  grammar only (no inline emphasis/links yet).
+  node kinds as numbers. TS/TSX highlighting = the TypeScript query + JavaScript's (+ JSX).
+- Extra queries (`YAML_EXTRA`, `BASH_EXTRA`, `markdown::BLOCK_EXTRA`) go first because the first pattern wins for a node. A query that
+  doesn't compile falls back silently in `Config::new`; `extra_queries_compile` guards them. Paint the node itself too: Bash's `$` and `variable_name`
+  have their own patterns. `markdown::ranges_without_children` must skip only named children: anonymous ones are the text's own punctuation.
 - Language servers inherit a PATH with their own folder first, else rust-analyzer can't find `cargo`/`rustfmt`
   when `~/.cargo/bin` isn't on PATH. rust-analyzer answers formatting with `null` when rustfmt is missing.
 - Positions to and from servers are UTF-16 (`lsp::text::{to_lsp, from_lsp}`); never send char columns.
@@ -491,6 +496,7 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
   bracketed paste (Cmd+V / Ctrl+Shift+V), Ctrl+V pastes the editor's own clipboard.
 
 ## Decisions
+`docs/decisions/0019-language-support.md` – astra's daily languages first (Markdown, Java, YAML, JSON, shell): inline Markdown + code blocks by language, distinct data keys, shell variables, per-language Enter, file's indent width, organize imports, `java.util` before `java.awt`.
 `docs/decisions/0018-several-terminals.md` – several shells in the dock: tabs with side-by-side panes, Alt keys with kitty chords, close asks, exited shells close their pane.
 `docs/decisions/0015-mission-control.md` – mission control: agents in their own worktrees (`<repo>-wt/<slug>`, acceptEdits there, never bypass), cards with activity / cost / tokens / changes / sparkline, land = commit leftovers + ff / merge / rebase behind a question (never push or force; conflicts aborted), remove refuses dirty, discard after a question, ask-an-agent from the code (Ctrl+U), presence markers + ticker, OSC 9 / bell, 5 hint contexts, one repo per agent.
 `docs/decisions/0013-workspaces.md` – workspaces: several roots (`label › path`), opening rules (folders, `*.catlas.toml`, `.code-atlas/workspace.toml`, folder of repos, `--single`), `@repo` scoping, multi-root tree + badges, background status of every repo, current repo follows the editor, Repos popup (Alt+O), fetch/pull all behind a question, recent workspaces (`-w`), LSP per root unchanged.
@@ -509,6 +515,8 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 `docs/decisions/0007-more-language-servers.md` – languages.toml layers + merge rules, server per language, fallback on a failed start, `also` servers, snippets, pull diagnostics, new keys, what was installed.
 
 ## Current state (2026-11-01)
+Language support, first pass done 2026-11-01 (decision 0019). Checked live: jdtls completion adds imports, JSON formats. Tests: unit (`syntax`, `enter`, `doc`), e2e `scenarios/lang_support.sh`.
+Waiting on astra's OK to install: marksman (Markdown outline, links, completion) and shfmt (shell formatting). Not done: Markdown preview and formatting, Javadoc tags, JSONC comment key.
 Several terminals done 2026-11-01 (decision 0018, see Keys (terminal, git)): tabs and side-by-side panes in the dock, titles from the shell.
 Tests: unit (`src/term/tabs.rs`, `dock.rs`), e2e `t_terminal_tabs_and_splits` (78 in all). Not done: top/bottom splits, moving panes, restoring shells after a restart.
 Own window parked on branch `native-window` (decision 0017 there): astra chose the terminal, like nvim, for now.

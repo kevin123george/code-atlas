@@ -733,7 +733,8 @@ impl Doc {
             }
         }
         match (smallest, self.syntax.lang) {
-            (Some(n), _) if n <= 8 => n,
+            // Odd amounts (6, 7, a stray alignment) say nothing about the file's step.
+            (Some(n @ (2 | 3 | 4 | 8)), _) => n,
             (_, Lang::Yaml | Lang::Json | Lang::Bash | Lang::Toml | Lang::Markdown) => 2,
             _ => TAB,
         }
@@ -1071,6 +1072,7 @@ mod enter_tests {
         assert_eq!(doc(Lang::Java, "class A {}").indent_unit(), 4);
         assert_eq!(doc(Lang::Java, "class A {\n  int x;\n}").indent_unit(), 2, "the file wins");
         assert_eq!(doc(Lang::Yaml, "a:\n    b: 1").indent_unit(), 4);
+        assert_eq!(doc(Lang::Yaml, "a:\n      b: 1").indent_unit(), 2, "6 is no step: the language's width, so a formatter can repair it");
         assert_eq!(doc(Lang::Java, "/**\n * x\n */\nclass A {\n    int y;\n}").indent_unit(), 4, "comment stars don't count");
         let mut d = doc(Lang::Yaml, "a:");
         d.newline();

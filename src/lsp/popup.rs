@@ -255,7 +255,7 @@ impl Popup {
                 let pa = !items[a].filter.to_lowercase().starts_with(&lower);
                 let pb = !items[b].filter.to_lowercase().starts_with(&lower);
                 let (wa, wb) = (items[a].word, items[b].word);
-                wa.is_some().cmp(&wb.is_some()).then(pa.cmp(&pb)).then_with(|| match (wa, wb) {
+                wa.is_some().cmp(&wb.is_some()).then(pa.cmp(&pb)).then(legacy_api(&items[a].detail).cmp(&legacy_api(&items[b].detail))).then_with(|| match (wa, wb) {
                     (Some(x), Some(y)) => score(b).cmp(&score(a)).then(x.cmp(&y)),
                     _ => items[a].sort.cmp(&items[b].sort),
                 })
@@ -553,5 +553,24 @@ mod tests {
         assert_eq!(l[0], "pub fn line(&self)");
         assert_eq!(l[1], "-> usize");
         assert!(l.iter().all(|x| x.chars().count() <= 20));
+    }
+}
+
+/// Java classes almost nobody means: `List` should offer `java.util` before `java.awt`, as IDEA does.
+fn legacy_api(detail: &str) -> bool {
+    ["java.awt", "javax.swing", "sun.", "com.sun.", "jdk.internal", "org.omg"].iter().any(|p| detail.contains(p))
+}
+
+#[cfg(test)]
+mod legacy_tests {
+    use super::legacy_api;
+
+    #[test]
+    fn old_java_packages_rank_last() {
+        assert!(legacy_api("java.awt"));
+        assert!(legacy_api("java.awt.List"));
+        assert!(legacy_api("com.sun.tools.javac.util"));
+        assert!(!legacy_api("java.util"));
+        assert!(!legacy_api("fn foo(sunset: u8)"));
     }
 }

@@ -681,6 +681,18 @@ impl App {
                     self.follow = true;
                 }
             }
+            Pending::OrganizeImports => {
+                let action = v.as_array().and_then(|list| {
+                    list.iter().find(|a| a.get("kind").and_then(Value::as_str).is_some_and(|k| k.starts_with("source.organizeImports"))).cloned()
+                });
+                match action {
+                    Some(a) => {
+                        self.run_action(sid, a, true);
+                        self.message = Some("Imports organized".into());
+                    }
+                    None => self.message = Some("This language server has no organize imports".into()),
+                }
+            }
             Pending::CodeActions => {
                 self.lsp.actions_waiting = self.lsp.actions_waiting.saturating_sub(1);
                 let new: Vec<(usize, Value)> = v.as_array().cloned().unwrap_or_default().into_iter().map(|a| (sid, a)).collect();
@@ -789,6 +801,20 @@ impl App {
         let params = json!({ "textDocument": { "uri": uri }, "options": { "tabSize": tab_size, "insertSpaces": true } });
         if let Some(s) = self.lsp.server(sid) {
             s.request("textDocument/formatting", params, Pending::Format { path: key });
+        }
+    }
+
+    /// Ctrl+Alt+O, as in IDEA: the server's own "organize imports" (decision 0019).
+    fn request_organize_imports(&mut self) {
+        let Some((sid, uri, _)) = self.active_server() else {
+            self.message = Some("No language server here to organize imports".into());
+            return;
+        };
+        let d = self.doc();
+        let range = Range::new(to_lsp(&d.rope, 0), to_lsp(&d.rope, d.rope.len_chars()));
+        let params = json!({ "textDocument": { "uri": uri }, "range": range, "context": { "diagnostics": [], "only": ["source.organizeImports"] } });
+        if let Some(s) = self.lsp.server(sid) {
+            s.request("textDocument/codeAction", params, Pending::OrganizeImports);
         }
     }
 
@@ -1454,6 +1480,7 @@ impl App {
                 }
             }
             KeyCode::Char('l') | KeyCode::Char('L') if ctrl && alt => self.request_format(),
+            KeyCode::Char('o') | KeyCode::Char('O') if ctrl && alt => self.request_organize_imports(),
             KeyCode::Enter if alt => self.request_actions(),
             _ => return false,
         }
