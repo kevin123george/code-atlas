@@ -2,7 +2,7 @@
 name = "code-atlas"
 version = "0.1.0"
 edition = "2021"
-description = "A terminal code editor with IntelliJ-style keys and an optional Vim mode"
+description = "A code editor with IntelliJ-style keys and an optional Vim mode, in a terminal or its own window"
 license = "MIT"
 
 [[bin]]
@@ -45,6 +45,11 @@ tree-sitter-yaml = "0.7.2"
 unicode-width = "0.2"
 vt100 = "0.15"
 tree-sitter-xml = "0.7.0"
+fontdue = "0.9"
+png = "0.17"
+softbuffer = "0.4"
+ttf-parser = "0.25"
+winit = "0.30"
 
 [profile.release]
 lto = true

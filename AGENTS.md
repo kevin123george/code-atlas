@@ -4,7 +4,7 @@
 > decision records, verification, secrets). Read this repo's `docs/decisions/` and `docs/ROADMAP.md` first.
 
 ## What it is
-An internal Atelier Astra tool: a terminal code editor that feels like IntelliJ IDEA (type straight away, IDEA
+An internal Atelier Astra tool: a code editor, in a terminal or its own window (`catlas --window`, `Code Atlas.app`, decision 0017), that feels like IntelliJ IDEA (type straight away, IDEA
 shortcuts) with an optional Vim mode, project view, code smarts over LSP, git (with a live review of what agents
 changed), a terminal pane, and a panel to run and watch Claude agents. Binary: `catlas`.
 `catlas <dir>` opens a project (no arguments = the current folder); `catlas <dir> file …` also opens files.
@@ -15,6 +15,21 @@ reopens recent workspaces. See **Keys (workspaces)**.
 ## Where it runs
 Locally in a terminal on the Mac and the laptop (`catlas [--vim] [dir] [file ...]`). No server. Best in a terminal with the
 kitty keyboard protocol (Ghostty, kitty, WezTerm, iTerm2 with "CSI u" on): it is needed for Ctrl+Shift combos.
+
+## The window (decision 0017)
+`catlas --window [dir] [file …]`, or `scripts/make-app.sh` for `~/Applications/Code Atlas.app`. The same `App` and
+`ui::draw` as in a terminal, on another ratatui backend. All chords arrive, so the fallback keys aren't needed.
+| Key | Does |
+|---|---|
+| **Cmd+any Ctrl chord** | the same as Ctrl (Cmd+S, Cmd+T, Cmd+Shift+F …), except in the terminal pane, where Cmd never becomes Ctrl+C |
+| **Cmd+V** / **Cmd+Q** | paste the system clipboard / close (unsaved files: asks by message, a second one quits; also the close button) |
+| **Cmd+= Cmd+- Cmd+0** | font bigger / smaller / back (this run only) |
+| Cmd+←/→ · Cmd+↑/↓ | line start / end · file start / end |
+| **left Option** / right Option | Alt for chords (Alt+1, Alt+F12) / types the layout's character (German `@ [ ] { }`) |
+`settings.toml`: `[window] font = "/path/to/font.ttf"`, `font_size = 13`. Opened without a terminal it takes `PATH` from
+the login shell and opens the newest recent workspace, else `~/Projects`, else home.
+Check the look without screen permission: `catlas --render-png out.png [--size 120x40] [--wait ms] [--keys alt+1,ctrl+t,x] [dir] [file]`
+draws through the real painter; `CATLAS_WINDOW_DUMP=out.png` writes what a live window shows (at most every 300 ms).
 
 ## Stack
 Rust 2021 (Mac: `~/.cargo/bin`, not on PATH; laptop: pacman `rust`). `ratatui` 0.29 + `crossterm` 0.28 (screen,
@@ -167,6 +182,11 @@ highlighting only.
   `Item::Sym` / `Mode::Symbols` in `quick.rs`, `draw_sym` in `project/ui.rs`, `Picker::merge` + `Lsp.idx_syms`
   + `open_symbols` in `lsp/`, `index::ui::draw_status` in `ui.rs`, `--index-status`/`--bench-index` in `main.rs`,
   `Doc.large` (`doc::is_large`) skipped by `lsp_sync` and `git::update_gutter`.
+- `src/window/` – the native window (decision 0017): `mod.rs` winit loop, login `PATH`, clipboard, notifications,
+  `render_png`; `backend.rs` ratatui `Backend` over a `Canvas`; `raster.rs` CPU painter (font lookup, glyph cache, hand-drawn
+  box / block / braille, cursor, PNG); `input.rs` pure window key → crossterm key mapping. Hooks elsewhere: `--window`,
+  `--render-png` and the bundle check in `main.rs`, `App::close_requested`, `window::notify` in `mission/notify.rs`.
+- `scripts/make-app.sh` – builds and installs `Code Atlas.app` (ad-hoc signed, no icon yet).
 - `src/config.rs` – `settings.toml` (`hints = true`, `autocomplete = true`) in the config folder: load (defaults on any
   problem, field by field), save one key.
 - `src/mackeys.rs` – macOS keys terminals mangle (decision 0010): Cmd chords with SUPER → Ctrl twins
@@ -394,6 +414,12 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
   e2e sets `CATLAS_CACHE_DIR=$SCRATCH/bin/.catlas-cache` (`$CACHE`), see `scenarios/index.sh`.
 
 ## Gotchas
+- Window fonts: fontdue merges all of a font's character tables, and MacRoman overrides Unicode (Menlo drew `·` as `∑`):
+  look characters up with `Face::glyph_id` (ttf-parser, Unicode tables only) and rasterize by index. It also prepares every glyph
+  when a font loads (Arial Unicode: 465 MB), so faces load on first need; never load a fallback eagerly.
+- A window test takes focus and receives whatever you are typing on the Mac: start one with `open -g`, on scratch
+  folders only, and don't kill one you didn't check is unused. `osascript` keystrokes and `screencapture` are refused here
+  without Accessibility / Screen Recording permission, hence `--render-png` and `CATLAS_WINDOW_DUMP`.
 - Terminals without the kitty protocol can't send Ctrl+Shift+letter, Ctrl+/ arrives as Ctrl+7 or Ctrl+_,
   Ctrl+Backspace as Ctrl+H. macOS Terminal.app lacks the protocol.
 - Shift+F3 (find previous) doesn't work without the kitty protocol: legacy terminals send `ESC[1;2R`, which
@@ -489,6 +515,7 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
   bracketed paste (Cmd+V / Ctrl+Shift+V), Ctrl+V pastes the editor's own clipboard.
 
 ## Decisions
+`docs/decisions/0017-native-window.md` – own window next to the terminal version: same `App` + `ui::draw` on a ratatui backend, winit + softbuffer + fontdue (CPU), Cmd = Ctrl, left Option = Alt, right Option types, login `PATH`, `Code Atlas.app`.
 `docs/decisions/0015-mission-control.md` – mission control: agents in their own worktrees (`<repo>-wt/<slug>`, acceptEdits there, never bypass), cards with activity / cost / tokens / changes / sparkline, land = commit leftovers + ff / merge / rebase behind a question (never push or force; conflicts aborted), remove refuses dirty, discard after a question, ask-an-agent from the code (Ctrl+U), presence markers + ticker, OSC 9 / bell, 5 hint contexts, one repo per agent.
 `docs/decisions/0013-workspaces.md` – workspaces: several roots (`label › path`), opening rules (folders, `*.catlas.toml`, `.code-atlas/workspace.toml`, folder of repos, `--single`), `@repo` scoping, multi-root tree + badges, background status of every repo, current repo follows the editor, Repos popup (Alt+O), fetch/pull all behind a question, recent workspaces (`-w`), LSP per root unchanged.
 `docs/decisions/0014-big-codebases.md` – persistent trigram index + tree-sitter symbols per root (multi-root API), log-structured segments in the cache, mtime/size scan + `notify` watcher, verified + ranked results, SYMBOLS / Alt+N without LSP, large-file mode, benchmark table.
@@ -505,7 +532,13 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 `docs/decisions/0006-git-and-terminal.md` – M5 choices: bottom dock, PTY + vt100, git CLI + in-memory gutter diffs, commit rules (never push/force), leave keys.
 `docs/decisions/0007-more-language-servers.md` – languages.toml layers + merge rules, server per language, fallback on a failed start, `also` servers, snippets, pull diagnostics, new keys, what was installed.
 
-## Current state (2026-10-31)
+## Current state (2026-11-01)
+Native window, first version on branch `native-window`, not merged yet (decision 0017, see The window). Checked for real on the
+Mac: opens from the bundle and with `--window`, draws editor / tree / popups / terminal pane / hints, first frame 1.2 s, 87 MB, ~2–5% CPU
+idle on a 2560x1640 window; astra's typing and mouse clicks reached a live window. Tests: 362 unit (key mapping, painter, fonts, login path);
+the e2e suite covers the terminal version only. Not checked yet: German dead keys and right Option `@`, Cmd chords and paste by hand,
+the Linux build. Not done: icon, menu bar, IME preedit display, opening files from Finder, e2e for the window, `theme::active()` from
+`control-center` (the painter uses the fixed theme; adjust on merge). After merging: update the row in `~/Projects/AGENTS.md`.
 Mission control done 2026-10-31 (mission-control, decision 0015, see Keys (mission control)): Ctrl+O / Alt+7
 full-screen cards per agent; `n` starts agents in their own worktrees (several at once), `l` lands one (commits
 its leftovers with a Claude trailer, fast-forward / merge / rebase, asks, then offers to remove the worktree),

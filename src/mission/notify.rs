@@ -53,6 +53,10 @@ pub fn send(text: &str) {
     if cfg!(test) {
         return;
     }
+    if crate::window::is_windowed() {
+        crate::window::notify(text);
+        return;
+    }
     let s = sequence(kind(), text);
     if s.is_empty() {
         return;

@@ -349,6 +349,18 @@ impl App {
         }
     }
 
+    /// The window's close button or Cmd+Q (decision 0017), from any focus: like Ctrl+Q, unsaved
+    /// files get a warning first and a second request quits.
+    pub fn close_requested(&mut self) {
+        let unsaved = self.docs.iter().filter(|d| d.dirty()).count();
+        if unsaved == 0 || self.armed == Some('q') {
+            self.quit = true;
+        } else {
+            self.armed = Some('q');
+            self.message = Some(format!("{unsaved} file(s) not saved. Close again to quit without saving."));
+        }
+    }
+
     fn idea_key(&mut self, k: KeyEvent, armed: Option<char>) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);

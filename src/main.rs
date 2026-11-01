@@ -1,5 +1,5 @@
-//! Code Atlas: a terminal code editor with IntelliJ-style keys.
-//! Usage: `catlas [--vim] [dir] [file ...]` (no folder given = the current folder is the project)
+//! Code Atlas: a code editor with IntelliJ-style keys, in a terminal or its own window.
+//! Usage: `catlas [--window] [--vim] [dir] [file ...]` (no folder given = the current folder is the project)
 
 mod agents;
 mod app;
@@ -17,6 +17,7 @@ mod syntax;
 mod term;
 mod ui;
 mod vim;
+mod window;
 mod workspace;
 
 use std::io::{self, stdout};
@@ -39,6 +40,7 @@ fn main() -> Result<()> {
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!("catlas [--vim] [--no-hints] [dir] [file ...]   open a project folder (default: the current one) and files in Code Atlas");
         println!("catlas dir1 dir2 … | x.catlas.toml | folder-of-repos   a workspace with several roots (Ctrl+O: repos)");
+        println!("  --window     open in its own window instead of the terminal (the Code Atlas app does this)");
         println!("  --single     open a folder that holds several repos as one folder (no workspace)");
         println!("  -w [n|name]  list the recent workspaces, or open one of them");
         println!("  --vim        start in Vim mode (also CATLAS_VIM=1; Ctrl+Alt+V toggles at runtime)");
@@ -60,8 +62,16 @@ fn main() -> Result<()> {
         println!("catlas {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    // Workspaces (decision 0013): -w lists / reopens recent ones, --single opts out of them.
+    // The native window (decision 0017): asked for, or running inside the app bundle.
     let mut args = args;
+    let in_bundle = std::env::current_exe().is_ok_and(|e| e.to_string_lossy().contains(".app/Contents/MacOS/"));
+    let wants_window = args.iter().any(|a| a == "--window") || in_bundle;
+    args.retain(|a| a != "--window" && !a.starts_with("-psn_"));
+    let render = take_render_args(&mut args)?;
+    if wants_window {
+        window::prepare(&args);
+    }
+    // Workspaces (decision 0013): -w lists / reopens recent ones, --single opts out of them.
     if let Some(i) = args.iter().position(|a| a == "-w" || a == "--workspace") {
         let list = workspace::load_recent(workspace::recent_path().as_deref());
         let Some(pick) = args.get(i + 1).cloned() else {
@@ -97,6 +107,13 @@ fn main() -> Result<()> {
         app.hints.on = false; // this run only: the saved choice stays
     }
 
+    if let Some(r) = render {
+        return window::render_png(&mut app, &r.out, r.cols, r.rows, r.wait, &r.keys);
+    }
+    if wants_window {
+        return window::run(&mut app);
+    }
+
     let enhanced = setup()?;
     app.hints.kitty = enhanced;
     let hook = std::panic::take_hook();
@@ -108,6 +125,33 @@ fn main() -> Result<()> {
     let result = run(&mut app);
     restore(enhanced)?;
     result
+}
+
+struct RenderArgs {
+    out: PathBuf,
+    cols: u16,
+    rows: u16,
+    wait: Duration,
+    keys: Vec<String>,
+}
+
+/// `--render-png out.png [--size 120x40] [--wait ms] [--keys alt+1,ctrl+t,x]`: one frame of the window
+/// without opening one, the way its look is checked (decision 0017).
+fn take_render_args(args: &mut Vec<String>) -> Result<Option<RenderArgs>> {
+    let Some(i) = args.iter().position(|a| a == "--render-png") else { return Ok(None) };
+    let mut value = |name: &str| -> Option<String> {
+        let at = args.iter().position(|a| a == name)?;
+        let v = args.get(at + 1).cloned();
+        args.drain(at..(at + 2).min(args.len()));
+        v
+    };
+    let _ = i;
+    let out = value("--render-png").ok_or_else(|| anyhow::anyhow!("--render-png needs a file"))?;
+    let size = value("--size").unwrap_or_else(|| "120x40".into());
+    let wait = value("--wait").and_then(|w| w.parse().ok()).unwrap_or(1500);
+    let keys = value("--keys").map(|k| k.split(',').map(str::to_owned).collect()).unwrap_or_default();
+    let (cols, rows) = size.split_once('x').and_then(|(c, r)| Some((c.parse().ok()?, r.parse().ok()?))).ok_or_else(|| anyhow::anyhow!("--size is like 120x40"))?;
+    Ok(Some(RenderArgs { out: out.into(), cols, rows, wait: Duration::from_millis(wait), keys }))
 }
 
 fn run(app: &mut app::App) -> Result<()> {
