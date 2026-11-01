@@ -6,6 +6,8 @@
 //! queried, and the result is cached until the revision or the scroll position changes.
 
 pub mod comment;
+pub mod enter;
+mod markdown;
 
 use std::path::Path;
 use std::sync::OnceLock;
@@ -224,14 +226,14 @@ impl Lang {
                     Lang::C => (tree_sitter_c::LANGUAGE.into(), vec![tree_sitter_c::HIGHLIGHT_QUERY]),
                     // C++'s query only adds to C's (as in Helix and Neovim).
                     Lang::Cpp => (tree_sitter_cpp::LANGUAGE.into(), vec![tree_sitter_cpp::HIGHLIGHT_QUERY, tree_sitter_c::HIGHLIGHT_QUERY]),
-                    Lang::Bash => (tree_sitter_bash::LANGUAGE.into(), vec![tree_sitter_bash::HIGHLIGHT_QUERY]),
+                    Lang::Bash => (tree_sitter_bash::LANGUAGE.into(), vec![BASH_EXTRA, tree_sitter_bash::HIGHLIGHT_QUERY]),
                     Lang::Lua => (tree_sitter_lua::LANGUAGE.into(), vec![tree_sitter_lua::HIGHLIGHTS_QUERY]),
                     Lang::Json => (tree_sitter_json::LANGUAGE.into(), vec![tree_sitter_json::HIGHLIGHTS_QUERY]),
-                    Lang::Yaml => (tree_sitter_yaml::LANGUAGE.into(), vec![tree_sitter_yaml::HIGHLIGHTS_QUERY]),
+                    Lang::Yaml => (tree_sitter_yaml::LANGUAGE.into(), vec![YAML_EXTRA, tree_sitter_yaml::HIGHLIGHTS_QUERY]),
                     Lang::Toml => (tree_sitter_toml_ng::LANGUAGE.into(), vec![tree_sitter_toml_ng::HIGHLIGHTS_QUERY]),
                     Lang::Html => (tree_sitter_html::LANGUAGE.into(), vec![tree_sitter_html::HIGHLIGHTS_QUERY]),
                     Lang::Css => (tree_sitter_css::LANGUAGE.into(), vec![tree_sitter_css::HIGHLIGHTS_QUERY]),
-                    Lang::Markdown => (tree_sitter_md::LANGUAGE.into(), vec![tree_sitter_md::HIGHLIGHT_QUERY_BLOCK]),
+                    Lang::Markdown => (tree_sitter_md::LANGUAGE.into(), vec![markdown::BLOCK_EXTRA, tree_sitter_md::HIGHLIGHT_QUERY_BLOCK]),
                     Lang::Dockerfile => (tree_sitter_containerfile::LANGUAGE.into(), vec![tree_sitter_containerfile::HIGHLIGHTS_QUERY]),
                     Lang::Sql => (tree_sitter_sequel::LANGUAGE.into(), vec![tree_sitter_sequel::HIGHLIGHTS_QUERY]),
                     Lang::Xml => (tree_sitter_xml::LANGUAGE_XML.into(), vec![XML_EXTRA, tree_sitter_xml::XML_HIGHLIGHT_QUERY]),
@@ -252,6 +254,31 @@ const XML_EXTRA: &str = r#"
 ["\"" "'"] @string
 (CDSect (CDStart) @punctuation.delimiter)
 (CDSect "]]>" @punctuation.delimiter)
+"#;
+
+/// The YAML grammar's query tags a key `@string` first and `@property` later, and the first wins,
+/// so keys and values had one colour.
+const YAML_EXTRA: &str = r#"
+(block_mapping_pair key: (flow_node [(double_quote_scalar) (single_quote_scalar)] @key))
+(block_mapping_pair key: (flow_node (plain_scalar (string_scalar) @key)))
+(flow_mapping (_ key: (flow_node [(double_quote_scalar) (single_quote_scalar)] @key)))
+(flow_mapping (_ key: (flow_node (plain_scalar (string_scalar) @key))))
+"#;
+
+/// Variables stand out in shell, also inside strings; `local` and friends are keywords.
+const BASH_EXTRA: &str = r#"
+(simple_expansion) @constant
+(simple_expansion "$" @constant)
+(simple_expansion (variable_name) @constant)
+(simple_expansion (special_variable_name) @constant)
+(expansion) @constant
+(expansion ["${" "}"] @constant)
+(expansion (variable_name) @constant)
+(expansion (special_variable_name) @constant)
+["declare" "typeset" "export" "readonly" "local" "unset" "unsetenv"] @keyword
+(heredoc_start) @label
+(heredoc_end) @label
+(command_substitution ["$(" ")"] @punctuation.special)
 "#;
 
 /// What a piece of code is, as far as colouring goes. `ui::theme::token_style` gives the colour.
@@ -276,6 +303,14 @@ pub enum Token {
     Label,
     Heading,
     Link,
+    /// A key in YAML or JSON: data files are mostly keys and values, so they differ clearly.
+    Key,
+    Strong,
+    Emphasis,
+    Strike,
+    /// Inline code and code blocks without a language in Markdown.
+    Code,
+    Quote,
 }
 
 /// Maps a tree-sitter capture name (`function.method`, `string.special.key`, …) to a [`Token`].
@@ -283,14 +318,19 @@ pub enum Token {
 pub fn token_for_capture(name: &str) -> Option<Token> {
     let first = name.split('.').next().unwrap_or("");
     Some(match name {
-        "string.special.key" => Token::Property,
+        "string.special.key" | "key" => Token::Key,
+        "text.strong" | "markup.bold" => Token::Strong,
+        "text.emphasis" | "markup.italic" => Token::Emphasis,
+        "text.strike" | "markup.strikethrough" => Token::Strike,
+        "text.quote" | "markup.quote" => Token::Quote,
         "string.escape" | "escape" | "string.special" => Token::Escape,
         "variable.parameter" => Token::Parameter,
         "variable.builtin" | "function.builtin" | "type.builtin" | "constant.builtin" | "boolean" => Token::Builtin,
         "function.macro" => Token::Macro,
         "text.title" | "markup.heading" => Token::Heading,
         "text.uri" | "text.reference" | "markup.link" => Token::Link,
-        "text.literal" | "markup.raw" => Token::String,
+        "text.literal" => Token::Code,
+        "markup.raw" => Token::String,
         "punctuation.special" => Token::Operator,
         _ => match first {
             "keyword" | "conditional" | "repeat" | "include" | "exception" | "storageclass" => Token::Keyword,
@@ -461,10 +501,17 @@ impl Syntax {
         }
         // Paint big nodes first so inner ones win; for the same node the earliest pattern wins.
         spans.sort_by(|a, b| (b.1 - b.0).cmp(&(a.1 - a.0)).then(b.2.cmp(&a.2)));
+        let mut spans: Vec<(usize, usize, Option<Token>)> = spans.into_iter().map(|(s, e, _, t)| (s, e, Some(t))).collect();
+        if self.lang == Lang::Markdown {
+            spans.extend(markdown::extras(&self.source, tree, start_byte..end_byte));
+        }
         let first_char = rope.line_to_char(first);
         let end_char = rope.line_to_char(last);
         let line_starts: Vec<usize> = (first..=last).map(|l| rope.line_to_char(l) - first_char).collect();
-        for (s, e, _, tok) in spans {
+        for (s, e, tok) in spans {
+            if e <= start_byte || s >= end_byte {
+                continue;
+            }
             let s = rope.byte_to_char(s.clamp(start_byte, end_byte)).max(first_char) - first_char;
             let e = rope.byte_to_char(e.clamp(start_byte, end_byte)).min(end_char) - first_char;
             let mut row = line_starts.partition_point(|&ls| ls <= s).saturating_sub(1);
@@ -473,7 +520,7 @@ impl Syntax {
                 let line_end = line_starts[row + 1];
                 let to = e.min(line_end);
                 for slot in &mut lines[row][p - line_starts[row]..to - line_starts[row]] {
-                    *slot = Some(tok);
+                    *slot = tok;
                 }
                 p = to;
                 row += 1;
@@ -532,6 +579,119 @@ mod tests {
         Lang::detect(Some(&PathBuf::from(name)), "")
     }
 
+    /// (text, token) runs of a document, for readable assertions.
+    fn runs(lang: Lang, text: &str) -> Vec<(String, Option<Token>)> {
+        let rope = Rope::from_str(text);
+        let mut syn = Syntax::new(lang);
+        syn.update(&rope, 1);
+        let lines = syn.visible(&rope, 0, rope.len_lines()).to_vec();
+        let mut out: Vec<(String, Option<Token>)> = Vec::new();
+        for (l, toks) in lines.iter().enumerate() {
+            for (c, t) in rope.line(l).chars().zip(toks) {
+                match out.last_mut() {
+                    Some((s, last)) if last == t => s.push(c),
+                    _ => out.push((c.to_string(), *t)),
+                }
+            }
+        }
+        out
+    }
+    fn token_of(all: &[(String, Option<Token>)], piece: &str) -> Option<Token> {
+        all.iter().find(|(s, _)| s.contains(piece)).unwrap_or_else(|| panic!("{piece:?} in {all:?}")).1
+    }
+
+    /// A query that doesn't compile falls back silently in `Config::new`, so these are checked here.
+    #[test]
+    fn extra_queries_compile() {
+        let check = |name: &str, lang: Language, q: &str| {
+            if let Err(e) = Query::new(&lang, q) {
+                panic!("{name}: {e:?}");
+            }
+        };
+        check("bash", tree_sitter_bash::LANGUAGE.into(), BASH_EXTRA);
+        check("yaml", tree_sitter_yaml::LANGUAGE.into(), YAML_EXTRA);
+        check("md block", tree_sitter_md::LANGUAGE.into(), markdown::BLOCK_EXTRA);
+        check("md inline", tree_sitter_md::INLINE_LANGUAGE.into(), markdown::INLINE_EXTRA);
+    }
+
+    #[test]
+    fn markdown_inline_styles() {
+        let r = runs(Lang::Markdown, "Some **bold** and *it* and `code` and ~~gone~~ and [a link](http://x.y).\n");
+        assert_eq!(token_of(&r, "bold"), Some(Token::Strong));
+        assert_eq!(token_of(&r, "it"), Some(Token::Emphasis));
+        assert_eq!(token_of(&r, "code"), Some(Token::Code));
+        assert_eq!(token_of(&r, "gone"), Some(Token::Strike));
+        assert_eq!(token_of(&r, "a link"), Some(Token::Link));
+        assert_eq!(token_of(&r, "http://x.y"), Some(Token::Link));
+        assert_eq!(token_of(&r, "Some"), None);
+    }
+
+    #[test]
+    fn markdown_structure() {
+        let r = runs(Lang::Markdown, "- [x] done\n- [ ] open\n\n> said **so**\n\n| H1 | H2 |\n|----|----|\n| a  | b  |\n");
+        assert_eq!(token_of(&r, "[x]"), Some(Token::Escape));
+        assert_eq!(token_of(&r, "[ ]"), Some(Token::Keyword));
+        assert_eq!(token_of(&r, "said"), Some(Token::Quote));
+        assert_eq!(token_of(&r, "so"), Some(Token::Strong), "inline styles work inside a quote");
+        assert_eq!(token_of(&r, "H1"), Some(Token::Strong));
+        assert_eq!(token_of(&r, "----"), Some(Token::Punctuation));
+    }
+
+    #[test]
+    fn code_blocks_are_coloured_by_their_language() {
+        let r = runs(Lang::Markdown, "```java\npublic class App { int x = 42; }\n```\n\n```sh\necho \"hi $USER\"\n```\n\n```yaml\nkey: value\n```\n\n```\nplain\n```\n");
+        assert_eq!(token_of(&r, "public"), Some(Token::Keyword));
+        assert_eq!(token_of(&r, "42"), Some(Token::Number));
+        assert_eq!(token_of(&r, "$USER"), Some(Token::Constant));
+        assert_eq!(token_of(&r, "key"), Some(Token::Key));
+        assert_eq!(token_of(&r, "value"), Some(Token::String));
+        assert_eq!(token_of(&r, "plain"), Some(Token::Code), "no language: one colour");
+        assert_eq!(token_of(&r, "java"), Some(Token::Label));
+    }
+
+    #[test]
+    fn a_code_block_in_a_quote_skips_the_markers() {
+        let r = runs(Lang::Markdown, "> ```json\n> {\"a\": 1}\n> ```\n");
+        assert_eq!(token_of(&r, "\"a\""), Some(Token::Key));
+        assert_eq!(token_of(&r, "1"), Some(Token::Number));
+    }
+
+    #[test]
+    fn fence_names() {
+        assert_eq!(markdown::fence_lang("bash"), Lang::Bash);
+        assert_eq!(markdown::fence_lang(" YML "), Lang::Yaml);
+        assert_eq!(markdown::fence_lang("java title=\"A.java\""), Lang::Java);
+        assert_eq!(markdown::fence_lang("{.python}"), Lang::Python);
+        assert_eq!(markdown::fence_lang("nonsense"), Lang::Plain);
+    }
+
+    #[test]
+    fn yaml_keys_and_values_differ() {
+        let r = runs(Lang::Yaml, "name: demo\n\"quoted\": 'v'\nlist:\n  - a: b\nflow: {x: y}\n");
+        assert_eq!(token_of(&r, "name"), Some(Token::Key));
+        assert_eq!(token_of(&r, "demo"), Some(Token::String));
+        assert_eq!(token_of(&r, "\"quoted\""), Some(Token::Key));
+        assert_eq!(token_of(&r, "'v'"), Some(Token::String));
+        assert_eq!(token_of(&r, "x"), Some(Token::Key));
+    }
+
+    #[test]
+    fn json_keys_and_values_differ() {
+        let r = runs(Lang::Json, "{\"k\": \"v\", \"n\": 1, \"t\": true}\n");
+        assert_eq!(token_of(&r, "\"k\""), Some(Token::Key));
+        assert_eq!(token_of(&r, "\"v\""), Some(Token::String));
+        assert_eq!(token_of(&r, "1"), Some(Token::Number));
+    }
+
+    #[test]
+    fn shell_variables_and_declarations() {
+        let r = runs(Lang::Bash, "local who=$1\necho \"hi $who ${HOME}\"\ncat <<EOT\nbody\nEOT\n");
+        assert_eq!(token_of(&r, "local"), Some(Token::Keyword));
+        assert_eq!(token_of(&r, "$who"), Some(Token::Constant), "also inside a string");
+        assert_eq!(token_of(&r, "${HOME}"), Some(Token::Constant));
+        assert_eq!(token_of(&r, "EOT"), Some(Token::Label));
+    }
+
     #[test]
     fn detects_languages_by_extension_and_shebang() {
         assert_eq!(lang("src/doc.rs"), Lang::Rust);
@@ -561,7 +721,7 @@ mod tests {
         assert_eq!(token_for_capture("keyword"), Some(Token::Keyword));
         assert_eq!(token_for_capture("keyword.return"), Some(Token::Keyword));
         assert_eq!(token_for_capture("string"), Some(Token::String));
-        assert_eq!(token_for_capture("string.special.key"), Some(Token::Property));
+        assert_eq!(token_for_capture("string.special.key"), Some(Token::Key));
         assert_eq!(token_for_capture("string.escape"), Some(Token::Escape));
         assert_eq!(token_for_capture("comment.documentation"), Some(Token::Comment));
         assert_eq!(token_for_capture("number"), Some(Token::Number));
@@ -607,7 +767,7 @@ mod tests {
     fn highlights_other_languages() {
         assert_eq!(tokens_of(Lang::Python, "def f():\n    return 'a'\n")[1][11], Some(Token::String));
         assert_eq!(tokens_of(Lang::TypeScript, "const x: number = 1;\n")[0][0], Some(Token::Keyword));
-        assert_eq!(tokens_of(Lang::Json, "{\"a\": 1}\n")[0][1], Some(Token::Property));
+        assert_eq!(tokens_of(Lang::Json, "{\"a\": 1}\n")[0][1], Some(Token::Key));
         assert_eq!(tokens_of(Lang::Toml, "# c\n")[0][0], Some(Token::Comment));
         assert_eq!(tokens_of(Lang::Bash, "echo hi # c\n")[0][9], Some(Token::Comment));
         assert_eq!(tokens_of(Lang::Java, "class A {}\n")[0][0], Some(Token::Keyword));

@@ -674,23 +674,68 @@ impl Doc {
         self.delete_selection();
         let line = self.line();
         let start = self.line_start(line);
-        let indent: String = self
-            .rope
-            .slice(start..self.cursor)
-            .chars()
-            .take_while(|c| *c == ' ' || *c == '\t')
-            .collect();
+        let before: String = self.rope.slice(start..self.cursor).chars().collect();
+        let whole: String = self.rope.line(line).chars().collect();
+        let after: String = whole.chars().skip(self.cursor - start).collect();
+        let after = after.trim_end_matches(['\r', '\n']).to_string();
+        let eol = self.eol();
+        let lang = self.syntax.lang;
+        let in_fence = lang == crate::syntax::Lang::Markdown && {
+            let earlier: Vec<String> = (0..line).map(|l| self.rope.line(l).chars().collect::<String>()).collect();
+            crate::syntax::enter::in_fence(earlier.iter().map(|l| l.trim_end_matches(['\r', '\n'])))
+        };
+        let unit = self.indent_unit();
+        if let Some(plan) = crate::syntax::enter::plan(lang, &before, &after, unit, in_fence) {
+            if plan.clear {
+                self.rope.remove(start..self.cursor);
+                self.cursor = start;
+                return;
+            }
+            if plan.dedent > 0 {
+                self.rope.remove(start..start + plan.dedent);
+                self.cursor -= plan.dedent;
+            }
+            self.insert_raw(&format!("{eol}{}", plan.text));
+            if let Some(close) = plan.close {
+                let back = self.cursor;
+                self.insert_raw(&format!("{eol}{close}"));
+                self.cursor = back;
+            }
+            return;
+        }
+        let indent: String = before.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
         let prev = self.cursor.checked_sub(1).map(|p| self.rope.char(p));
         let next = self.rope.get_char(self.cursor);
-        let eol = self.eol();
+        let inner = format!("{eol}{indent}{}", " ".repeat(unit));
         if matches!((prev, next), (Some('{'), Some('}')) | (Some('('), Some(')')) | (Some('['), Some(']'))) {
-            let inner = format!("{eol}{indent}{}", " ".repeat(TAB));
             self.insert_raw(&inner);
             let back = self.cursor;
             self.insert_raw(&format!("{eol}{indent}"));
             self.cursor = back;
+        } else if matches!(prev, Some('{' | '(' | '[')) && after.trim().is_empty() {
+            // An opener at the end of a line (its closer is further down, or not typed yet).
+            self.insert_raw(&inner);
         } else {
             self.insert_raw(&format!("{eol}{indent}"));
+        }
+    }
+
+    /// Spaces per indent step: what the file already uses, else what its language usually does.
+    pub fn indent_unit(&self) -> usize {
+        use crate::syntax::Lang;
+        let mut smallest = None;
+        for line in self.rope.lines().take(400) {
+            let spaces = line.chars().take_while(|c| *c == ' ').count();
+            let next = line.chars().nth(spaces);
+            // A ` * ` in a block comment is one space in, not an indent.
+            if spaces >= 2 && next.is_some_and(|c| !c.is_whitespace() && c != '*') {
+                smallest = Some(smallest.map_or(spaces, |s: usize| s.min(spaces)));
+            }
+        }
+        match (smallest, self.syntax.lang) {
+            (Some(n), _) if n <= 8 => n,
+            (_, Lang::Yaml | Lang::Json | Lang::Bash | Lang::Toml | Lang::Markdown) => 2,
+            _ => TAB,
         }
     }
 
@@ -728,7 +773,8 @@ impl Doc {
         self.delete_selection();
         let line = self.line();
         let col = self.display_col(line, self.col());
-        let n = TAB - col % TAB;
+        let unit = self.indent_unit();
+        let n = unit - col % unit;
         self.insert_raw(&" ".repeat(n));
     }
 
@@ -738,6 +784,7 @@ impl Doc {
     }
 
     fn indent_lines(&mut self, a: usize, b: usize, add: bool) {
+        let unit = self.indent_unit();
         let changes = |l: usize| {
             if add {
                 self.line_len(l) > 0
@@ -757,15 +804,15 @@ impl Doc {
                 if self.line_len(line) == 0 {
                     continue;
                 }
-                self.rope.insert(start, &" ".repeat(TAB));
-                cur = shift(cur, TAB as isize);
-                anc = anc.map(|p| shift(p, TAB as isize));
+                self.rope.insert(start, &" ".repeat(unit));
+                cur = shift(cur, unit as isize);
+                anc = anc.map(|p| shift(p, unit as isize));
             } else {
                 let chars = self.rope.line(line);
                 let n = if chars.get_char(0) == Some('\t') {
                     1
                 } else {
-                    chars.chars().take(TAB).take_while(|c| *c == ' ').count()
+                    chars.chars().take(unit).take_while(|c| *c == ' ').count()
                 };
                 if n == 0 {
                     continue;
@@ -967,6 +1014,69 @@ fn class(c: char) -> u8 {
 fn normalize_eol(text: &str, eol: &str) -> String {
     let lf = text.replace("\r\n", "\n");
     if eol == "\n" { lf } else { lf.replace('\n', eol) }
+}
+
+#[cfg(test)]
+mod enter_tests {
+    use super::*;
+    use crate::syntax::{Lang, Syntax};
+
+    fn doc(lang: Lang, text: &str) -> Doc {
+        let mut d = Doc::empty();
+        d.syntax = Syntax::new(lang);
+        d.insert_str(text);
+        d
+    }
+
+    #[test]
+    fn enter_continues_a_markdown_list_and_an_empty_item_ends_it() {
+        let mut d = doc(Lang::Markdown, "- one");
+        d.newline();
+        assert_eq!(d.rope.to_string(), "- one\n- ");
+        d.newline();
+        assert_eq!(d.rope.to_string(), "- one\n", "the empty item is gone, and the cursor stays on its line");
+        assert_eq!(d.line(), 1);
+        let mut d = doc(Lang::Markdown, "```\n- code");
+        d.newline();
+        assert_eq!(d.rope.to_string(), "```\n- code\n", "not a list in a code block");
+    }
+
+    #[test]
+    fn enter_in_yaml_shell_and_comments() {
+        let mut d = doc(Lang::Yaml, "services:");
+        d.newline();
+        assert_eq!(d.rope.to_string(), "services:\n  ");
+        let mut d = doc(Lang::Bash, "if x; then\n  y\n  fi");
+        d.newline();
+        assert_eq!(d.rope.to_string(), "if x; then\n  y\nfi\n");
+        let mut d = doc(Lang::Java, "/**");
+        d.newline();
+        assert_eq!(d.rope.to_string(), "/**\n * \n */");
+        assert_eq!(d.line(), 1);
+        d.undo();
+        assert_eq!(d.rope.to_string(), "/**", "one undo step");
+    }
+
+    #[test]
+    fn an_opener_at_the_end_of_a_line_indents() {
+        let mut d = doc(Lang::Java, "void f() {\n}");
+        d.cursor = 10;
+        d.newline();
+        assert_eq!(d.rope.to_string(), "void f() {\n    \n}");
+    }
+
+    #[test]
+    fn indent_width_follows_the_file_then_the_language() {
+        assert_eq!(doc(Lang::Yaml, "a: 1").indent_unit(), 2);
+        assert_eq!(doc(Lang::Java, "class A {}").indent_unit(), 4);
+        assert_eq!(doc(Lang::Java, "class A {\n  int x;\n}").indent_unit(), 2, "the file wins");
+        assert_eq!(doc(Lang::Yaml, "a:\n    b: 1").indent_unit(), 4);
+        assert_eq!(doc(Lang::Java, "/**\n * x\n */\nclass A {\n    int y;\n}").indent_unit(), 4, "comment stars don't count");
+        let mut d = doc(Lang::Yaml, "a:");
+        d.newline();
+        d.tab();
+        assert_eq!(d.rope.to_string(), "a:\n    ", "Tab moves one step");
+    }
 }
 
 #[cfg(test)]

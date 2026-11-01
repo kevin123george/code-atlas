@@ -55,6 +55,12 @@ pub mod theme {
             Property | Parameter => TEXT,
             Operator | Punctuation => TEXT_2,
             Heading => return Style::new().fg(S_BLUE).add_modifier(Modifier::BOLD),
+            Key => S_BLUE,
+            Strong => return Style::new().fg(TEXT).add_modifier(Modifier::BOLD),
+            Emphasis => return Style::new().fg(TEXT).add_modifier(Modifier::ITALIC),
+            Strike => return Style::new().fg(MUTED).add_modifier(Modifier::CROSSED_OUT),
+            Code => return Style::new().fg(S_AQUA).bg(SURFACE_2),
+            Quote => return Style::new().fg(TEXT_2).add_modifier(Modifier::ITALIC),
         };
         Style::new().fg(fg)
     }

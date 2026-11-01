@@ -785,7 +785,8 @@ impl App {
         if !self.can(sid, "textDocument/formatting") {
             return;
         }
-        let params = json!({ "textDocument": { "uri": uri }, "options": { "tabSize": crate::doc::TAB, "insertSpaces": true } });
+        let tab_size = self.doc().indent_unit();
+        let params = json!({ "textDocument": { "uri": uri }, "options": { "tabSize": tab_size, "insertSpaces": true } });
         if let Some(s) = self.lsp.server(sid) {
             s.request("textDocument/formatting", params, Pending::Format { path: key });
         }
