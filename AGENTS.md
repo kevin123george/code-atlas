@@ -496,6 +496,7 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
   bracketed paste (Cmd+V / Ctrl+Shift+V), Ctrl+V pastes the editor's own clipboard.
 
 ## Decisions
+`docs/decisions/0020-neovim-for-daily-editing.md` – daily editing moves to Neovim (`~/.config/nvim`); Code Atlas stays as it is, no new work unless astra asks.
 `docs/decisions/0019-language-support.md` – astra's daily languages first (Markdown, Java, YAML, JSON, shell): inline Markdown + code blocks by language, distinct data keys, shell variables, per-language Enter, file's indent width, organize imports, `java.util` before `java.awt`.
 `docs/decisions/0018-several-terminals.md` – several shells in the dock: tabs with side-by-side panes, Alt keys with kitty chords, close asks, exited shells close their pane.
 `docs/decisions/0015-mission-control.md` – mission control: agents in their own worktrees (`<repo>-wt/<slug>`, acceptEdits there, never bypass), cards with activity / cost / tokens / changes / sparkline, land = commit leftovers + ff / merge / rebase behind a question (never push or force; conflicts aborted), remove refuses dirty, discard after a question, ask-an-agent from the code (Ctrl+U), presence markers + ticker, OSC 9 / bell, 5 hint contexts, one repo per agent.
@@ -515,8 +516,9 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 `docs/decisions/0007-more-language-servers.md` – languages.toml layers + merge rules, server per language, fallback on a failed start, `also` servers, snippets, pull diagnostics, new keys, what was installed.
 
 ## Current state (2026-11-01)
+**Paused:** astra edits in Neovim now (decision 0020). No new work unless asked.
 Language support, first pass done 2026-11-01 (decision 0019). Checked live: jdtls completion adds imports, JSON formats. Tests: unit (`syntax`, `enter`, `doc`), e2e `scenarios/lang_support.sh`.
-Waiting on astra's OK to install: marksman (Markdown outline, links, completion) and shfmt (shell formatting). Not done: Markdown preview and formatting, Javadoc tags, JSONC comment key.
+marksman and shfmt aren't installed for Code Atlas (Neovim has its own through Mason). Not done: Markdown preview and formatting, Javadoc tags, JSONC comment key.
 Several terminals done 2026-11-01 (decision 0018, see Keys (terminal, git)): tabs and side-by-side panes in the dock, titles from the shell.
 Tests: unit (`src/term/tabs.rs`, `dock.rs`), e2e `t_terminal_tabs_and_splits` (78 in all). Not done: top/bottom splits, moving panes, restoring shells after a restart.
 Own window parked on branch `native-window` (decision 0017 there): astra chose the terminal, like nvim, for now.
