@@ -109,7 +109,7 @@ highlighting only.
   45 columns before the sidebar), `app.agents_tick()` in the main loop, `Doc::reload_text` in `doc.rs`.
 - `src/dock.rs` – bottom dock (M5): tabs Terminal / Commit, focus, layout (`split_rows`), keys, mouse, paste,
   `dock_tick` glue (returns "redraw"; it also runs `git_view_tick`), drawing the tab row and bodies.
-- `src/term/` – terminal pane (M5): `mod.rs` PTY + reader thread + `vt100` parser, query replies, resize,
+- `src/term/` – terminal pane (M5): `tabs.rs` several shells as tabs + panes (generic model, decision 0018); `mod.rs` PTY + reader thread + `vt100` parser, query replies, resize,
   scrollback; `keys.rs` key → xterm bytes and query detection; `ui.rs` screen → buffer (ANSI palette in theme colours).
 - `src/git/` – git (M5): `mod.rs` state + background jobs (status, HEAD texts, gutter diffs, commit, diff view),
   `run`/`run_with` (env, stdin), `apply`, `snapshot` (temp-index tree of the working tree), `toplevel`;
@@ -321,6 +321,8 @@ and completion opens by itself only in insert mode (Ctrl+J stays Vim's line down
 | Key | Does |
 |---|---|
 | **Alt+F12** | terminal: open + focus (starts `$SHELL -l` in the project root); focused: hide the dock |
+| **Alt+T** (Ctrl+Shift+T) · **Alt+S** (Ctrl+Shift+D) | in the terminal: a new shell in its own tab · a pane to the right (refused under 20 columns each) |
+| **Ctrl+Alt+←/→** · **Alt+W** (Ctrl+Shift+W) | next / previous shell, through panes, then tabs, wrapping · close the shell (a running one asks: press again). A shell that exits closes its pane unless it is the last. Click a tab, a pane or `+` too |
 | in the terminal | every key goes to the shell (Esc, Ctrl+C, Ctrl+R ...) · **Ctrl+Alt+↑** back to the editor (dock stays) · Shift+Esc hide · Shift+PgUp/PgDn or wheel scrollback · Alt+1 / Alt+9 switch tool window · Enter restarts an exited shell |
 | **Alt+0** | Commit panel (toggles) · **Ctrl+K** opens it with the cursor in the message (again with a message: commit) |
 | in the Commit panel | ↑↓ PgUp PgDn Home End · Space tick/untick · Ctrl+A all/none · Enter or F4 diff · Tab list ↔ message · typing starts the message · **Ctrl+Enter** commit (fallbacks **Alt+Enter**, Ctrl+J) · F5 refresh · Esc editor; click a row, click `[x]` to tick |
@@ -489,6 +491,7 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
   bracketed paste (Cmd+V / Ctrl+Shift+V), Ctrl+V pastes the editor's own clipboard.
 
 ## Decisions
+`docs/decisions/0018-several-terminals.md` – several shells in the dock: tabs with side-by-side panes, Alt keys with kitty chords, close asks, exited shells close their pane.
 `docs/decisions/0015-mission-control.md` – mission control: agents in their own worktrees (`<repo>-wt/<slug>`, acceptEdits there, never bypass), cards with activity / cost / tokens / changes / sparkline, land = commit leftovers + ff / merge / rebase behind a question (never push or force; conflicts aborted), remove refuses dirty, discard after a question, ask-an-agent from the code (Ctrl+U), presence markers + ticker, OSC 9 / bell, 5 hint contexts, one repo per agent.
 `docs/decisions/0013-workspaces.md` – workspaces: several roots (`label › path`), opening rules (folders, `*.catlas.toml`, `.code-atlas/workspace.toml`, folder of repos, `--single`), `@repo` scoping, multi-root tree + badges, background status of every repo, current repo follows the editor, Repos popup (Alt+O), fetch/pull all behind a question, recent workspaces (`-w`), LSP per root unchanged.
 `docs/decisions/0014-big-codebases.md` – persistent trigram index + tree-sitter symbols per root (multi-root API), log-structured segments in the cache, mtime/size scan + `notify` watcher, verified + ranked results, SYMBOLS / Alt+N without LSP, large-file mode, benchmark table.
@@ -505,7 +508,10 @@ badge shows IDEA / NORMAL / INSERT / VISUAL / V-LINE, the cursor is a block in n
 `docs/decisions/0006-git-and-terminal.md` – M5 choices: bottom dock, PTY + vt100, git CLI + in-memory gutter diffs, commit rules (never push/force), leave keys.
 `docs/decisions/0007-more-language-servers.md` – languages.toml layers + merge rules, server per language, fallback on a failed start, `also` servers, snippets, pull diagnostics, new keys, what was installed.
 
-## Current state (2026-10-31)
+## Current state (2026-11-01)
+Several terminals done 2026-11-01 (decision 0018, see Keys (terminal, git)): tabs and side-by-side panes in the dock, titles from the shell.
+Tests: unit (`src/term/tabs.rs`, `dock.rs`), e2e `t_terminal_tabs_and_splits` (78 in all). Not done: top/bottom splits, moving panes, restoring shells after a restart.
+Own window parked on branch `native-window` (decision 0017 there): astra chose the terminal, like nvim, for now.
 Mission control done 2026-10-31 (mission-control, decision 0015, see Keys (mission control)): Ctrl+O / Alt+7
 full-screen cards per agent; `n` starts agents in their own worktrees (several at once), `l` lands one (commits
 its leftovers with a Claude trailer, fast-forward / merge / rebase, asks, then offers to remove the worktree),
@@ -629,6 +635,6 @@ M5 git + terminal done 2026-10-25 (see Keys (terminal, git), decision 0006): bot
 commit, unified diff view, branch in the status bar, git colours in the tree. Tests: unit (status parsing, diff
 → marks/hunks, key encoding, query detection, dock layout, a real PTY, a scratch-repo status → gutter → diff →
 commit flow) and e2e `tests/e2e/scenarios/git_term.sh` (terminal echo/ls, gutter + branch, panel → diff →
-commit landing in `git log`). Not done yet: several terminals as tabs, mouse forwarding to terminal programs,
+commit landing in `git log`). Not done yet: mouse forwarding to terminal programs,
 copying text out of the terminal, side-by-side diff, staging single hunks, rollback/revert, a cursor in the
 commit message (append-only editing), Problems tab (M3 diagnostics could go there).

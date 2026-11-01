@@ -245,7 +245,7 @@ fn fingerprint(app: &App) -> String {
         g.panel.field,
         g.diff.as_ref().map(|v| (v.path.clone(), v.scroll))
     );
-    let term = dk.term.as_ref().map(|t| t.screen().scrollback());
+    let term = dk.term().map(|t| (t.screen().scrollback(), dk.terms.pane_count(), dk.terms.active_tab(), dk.terms.active_pane()));
     let vim = app.vim.as_ref().map(|v| format!("{:?} {:?} {:?} {:?}", v.mode.label(), v.cmdline(), v.pending(), v.visual_range(app.doc())));
     let lsp = match &app.lsp.popup {
         None => String::new(),
@@ -401,11 +401,11 @@ fn setups(ctx: Ctx) -> Vec<Setup> {
         Ctx::Terminal => vec![
             |app| {
                 keys(app, "Alt+F12");
-                app.dock.term.as_mut().expect("a shell").feed("line\r\n".repeat(80).as_bytes());
+                app.dock.term_mut().expect("a shell").feed("line\r\n".repeat(80).as_bytes());
             },
             |app| {
                 keys(app, "Alt+F12");
-                let t = app.dock.term.as_mut().expect("a shell");
+                let t = app.dock.term_mut().expect("a shell");
                 t.feed("line\r\n".repeat(80).as_bytes());
                 t.scroll(5);
             },

@@ -1,5 +1,5 @@
-//! The bottom dock (M5): a tool-window area under the editor with tabs (Terminal, Commit), like
-//! IntelliJ's bottom tool windows. Owns the terminal (`src/term/`) and git state (`src/git/`).
+//! The bottom dock (M5): a tool-window area under the editor with tabs (Terminals, Commit), like
+//! IntelliJ's bottom tool windows. Owns the shells (`src/term/`, decision 0018) and git state (`src/git/`).
 //!
 //! Hooks elsewhere: `App.dock`, `dock_key`/`dock_paste`/`dock_mouse` first in `App::handle`,
 //! `dock_tick` (redraw when it says so) in the main loop, `split`/`draw`/`draw_over_editor` in `ui::draw`,
@@ -15,6 +15,7 @@ use ratatui::style::{Modifier, Style};
 use crate::app::App;
 use crate::git::{Field, Git};
 use crate::project::Target;
+use crate::term::tabs::{can_split, pane_rects, Tabs};
 use crate::term::Terminal;
 use crate::ui::theme::*;
 
@@ -30,13 +31,12 @@ pub enum Tab {
     Commit,
 }
 
-impl Tab {
-    fn title(self) -> &'static str {
-        match self {
-            Tab::Terminal => "Terminal",
-            Tab::Commit => "Commit",
-        }
-    }
+/// What a click on the dock's tab row hits.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Span {
+    Shell(usize),
+    NewShell,
+    Commit,
 }
 
 pub struct Dock {
@@ -44,7 +44,9 @@ pub struct Dock {
     pub focused: bool,
     pub tab: Tab,
     pub height: u16,
-    pub term: Option<Terminal>,
+    pub terms: Tabs<Terminal>,
+    /// The close key was pressed once; the next press closes a running shell.
+    close_armed: bool,
     pub git: Git,
     root: PathBuf,
     /// Screen areas from the last draw (mouse, terminal size).
@@ -53,7 +55,8 @@ pub struct Dock {
     diff_rect: Rect,
     list_rect: Rect,
     msg_rect: Rect,
-    tab_spans: Vec<(u16, u16, Tab)>,
+    tab_spans: Vec<(u16, u16, Span)>,
+    pane_rects: Vec<Rect>,
 }
 
 /// Splits the editor area into (editor, dock) for a dock of `want` rows. No dock when there is
@@ -84,7 +87,8 @@ impl Dock {
             focused: false,
             tab: Tab::Terminal,
             height: DEFAULT_H,
-            term: None,
+            terms: Tabs::default(),
+            close_armed: false,
             git: Git::new(root),
             root: root.to_path_buf(),
             rect: Rect::default(),
@@ -93,6 +97,7 @@ impl Dock {
             list_rect: Rect::default(),
             msg_rect: Rect::default(),
             tab_spans: Vec::new(),
+            pane_rects: Vec::new(),
         }
     }
 
@@ -101,22 +106,38 @@ impl Dock {
         self.focused || self.git.diff.is_some()
     }
 
-    /// Starts a shell when there is none (or the last one exited). Returns an error to show.
-    fn ensure_term(&mut self) -> Option<String> {
-        if self.term.as_ref().is_some_and(|t| t.exited.is_none()) {
-            return None;
-        }
+    /// The shell the keys go to.
+    pub fn term(&self) -> Option<&Terminal> {
+        self.terms.current()
+    }
+
+    pub fn term_mut(&mut self) -> Option<&mut Terminal> {
+        self.terms.current_mut()
+    }
+
+    fn spawn(&self) -> Result<Terminal, String> {
         let (rows, cols) = if self.body.height > 0 {
             (self.body.height, self.body.width)
         } else {
             (self.height - 1, crossterm::terminal::size().map(|s| s.0).unwrap_or(80))
         };
-        match Terminal::spawn(&self.root, rows, cols) {
+        Terminal::spawn(&self.root, rows, cols).map_err(|e| format!("Couldn't start the terminal: {e:#}"))
+    }
+
+    /// Starts a shell when there is none (or the current one exited). Returns an error to show.
+    fn ensure_term(&mut self) -> Option<String> {
+        if self.term().is_some_and(|t| t.exited.is_none()) {
+            return None;
+        }
+        match self.spawn() {
             Ok(t) => {
-                self.term = Some(t);
+                match self.term_mut() {
+                    Some(slot) => *slot = t,
+                    None => self.terms.new_tab(t),
+                }
                 None
             }
-            Err(e) => Some(format!("Couldn't start the terminal: {e:#}")),
+            Err(e) => Some(e),
         }
     }
 
@@ -125,7 +146,7 @@ impl Dock {
     }
 }
 
-const TERM_HINT: &str = "Terminal: keys go to the shell · Ctrl+Alt+↑ editor · Alt+F12 hide · Shift+PgUp/PgDn scroll";
+const TERM_HINT: &str = "Terminal: keys go to the shell · Alt+T new · Alt+S split · Ctrl+Alt+←/→ switch · Ctrl+Alt+↑ editor · Alt+F12 hide";
 const COMMIT_HINT: &str = "Commit: Space tick · Enter diff · Tab message · Ctrl+Enter / Alt+Enter commit · Esc editor";
 
 // ---- glue: the dock's side of `App` ---------------------------------------------------------
@@ -135,8 +156,13 @@ impl App {
     /// git results). The loop polls every 30 ms, so shell output shows within a frame or two.
     pub fn dock_tick(&mut self) -> bool {
         let mut changed = false;
-        if let Some(t) = &mut self.dock.term {
+        for t in self.dock.terms.iter_mut() {
             changed |= t.poll();
+        }
+        // With other shells open, one that ended just goes; the last one stays to say why.
+        if self.dock.terms.remove_dead(|t| t.exited.is_some()) > 0 {
+            self.message = Some("A shell ended and its pane closed".into());
+            changed = true;
         }
         if let Some(m) = self.dock.git.poll(&self.docs, self.active) {
             self.message = Some(m);
@@ -242,17 +268,76 @@ impl App {
         }
         match self.dock.tab {
             Tab::Terminal => {
-                self.terminal_key(k);
+                if !self.shells_key(k) {
+                    self.terminal_key(k);
+                }
                 true
             }
             Tab::Commit => self.commit_key(k),
         }
     }
 
+    /// New, split, switch and close: the few keys the dock takes from the focused shell. Each has
+    /// an Alt form so it works without the kitty protocol. False: the key belongs to the shell.
+    fn shells_key(&mut self, k: KeyEvent) -> bool {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+        let ch = |c: char| matches!(k.code, KeyCode::Char(x) if x.eq_ignore_ascii_case(&c));
+        let chord = |a: char, kitty: char| (alt && !ctrl && !shift && ch(a)) || (ctrl && shift && !alt && ch(kitty));
+        let armed = std::mem::take(&mut self.dock.close_armed);
+        let d = &mut self.dock;
+        if chord('t', 't') {
+            match d.spawn() {
+                Ok(t) => {
+                    d.terms.new_tab(t);
+                    self.message = None;
+                }
+                Err(e) => self.message = Some(e),
+            }
+        } else if chord('s', 'd') {
+            let panes = d.terms.panes_mut().len();
+            if !can_split(d.body.width, panes) {
+                self.message = Some("No room for another pane here: Alt+T opens a new tab".into());
+                return true;
+            }
+            match d.spawn() {
+                Ok(t) => {
+                    d.terms.split(t);
+                    self.message = None;
+                }
+                Err(e) => self.message = Some(e),
+            }
+        } else if chord('w', 'w') {
+            let running = d.term().is_some_and(|t| t.exited.is_none());
+            if running && !armed {
+                d.close_armed = true;
+                self.message = Some(format!("Stops this shell and anything running in it. {} again closes it.", if alt { "Alt+W" } else { "Ctrl+Shift+W" }));
+                return true;
+            }
+            d.terms.close_current();
+            self.message = None;
+            if d.terms.is_empty() {
+                d.open = false;
+                d.focused = false;
+            }
+        } else if ctrl && alt && matches!(k.code, KeyCode::Left | KeyCode::Right) {
+            if d.terms.pane_count() > 1 {
+                d.terms.step(k.code == KeyCode::Right);
+                self.message = None;
+            } else {
+                self.message = Some("Only one shell: Alt+T opens another".into());
+            }
+        } else {
+            return false;
+        }
+        true
+    }
+
     fn terminal_key(&mut self, k: KeyEvent) {
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         let d = &mut self.dock;
-        let alive = d.term.as_ref().is_some_and(|t| t.exited.is_none());
+        let alive = d.term().is_some_and(|t| t.exited.is_none());
         if !alive {
             match k.code {
                 KeyCode::Enter => self.message = Some(d.ensure_term().unwrap_or_else(|| TERM_HINT.into())),
@@ -261,8 +346,8 @@ impl App {
             }
             return;
         }
-        let t = d.term.as_mut().unwrap();
         let page = (d.body.height.max(2) - 1) as isize;
+        let t = d.terms.current_mut().unwrap();
         match k.code {
             KeyCode::PageUp if shift => t.scroll(page),
             KeyCode::PageDown if shift => t.scroll(-page),
@@ -420,7 +505,7 @@ impl App {
         }
         match self.dock.tab {
             Tab::Terminal => {
-                if let Some(t) = &mut self.dock.term {
+                if let Some(t) = self.dock.term_mut() {
                     t.paste(text);
                 }
             }
@@ -460,14 +545,27 @@ impl App {
             self.project.focus_tree = false;
             self.agents.focus = false;
             if m.row == d.rect.y {
-                if let Some(&(_, _, tab)) = d.tab_spans.iter().find(|(a, b, _)| m.column >= *a && m.column < *b) {
-                    d.tab = tab;
-                    if tab == Tab::Terminal {
-                        if let Some(e) = d.ensure_term() {
-                            self.message = Some(e);
+                if let Some(&(_, _, span)) = d.tab_spans.iter().find(|(a, b, _)| m.column >= *a && m.column < *b) {
+                    d.close_armed = false;
+                    match span {
+                        Span::Shell(i) => {
+                            d.tab = Tab::Terminal;
+                            d.terms.select_tab(i);
+                            if let Some(e) = d.ensure_term() {
+                                self.message = Some(e);
+                            }
                         }
-                    } else {
-                        d.git.refresh();
+                        Span::NewShell => {
+                            d.tab = Tab::Terminal;
+                            match d.spawn() {
+                                Ok(t) => d.terms.new_tab(t),
+                                Err(e) => self.message = Some(e),
+                            }
+                        }
+                        Span::Commit => {
+                            d.tab = Tab::Commit;
+                            d.git.refresh();
+                        }
                     }
                 }
                 return true;
@@ -475,9 +573,15 @@ impl App {
         }
         match d.tab {
             Tab::Terminal => {
-                if let Some(t) = &mut d.term {
+                // A click focuses the pane under it, the wheel scrolls it.
+                if let Some(pane) = d.pane_rects.iter().position(|r| inside(*r)) {
+                    if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+                        d.terms.select_pane(pane);
+                    }
                     if wheel != 0 {
-                        t.scroll(-wheel);
+                        if let Some(t) = d.terms.panes_mut().get_mut(pane) {
+                            t.scroll(-wheel);
+                        }
                     }
                 }
             }
@@ -526,28 +630,38 @@ pub fn draw(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
     let head = Rect::new(area.x, area.y, area.width, 1);
     buf.set_style(head, Style::new().bg(SURFACE_1).fg(TEXT_2));
     d.tab_spans.clear();
+    let mut labels: Vec<(String, Span)> = shell_labels(&d.terms, false).into_iter().enumerate().map(|(i, l)| (l, Span::Shell(i))).collect();
+    let commit = if d.git.entries.is_empty() { " Commit ".to_string() } else { format!(" Commit {} ", d.git.entries.len()) };
+    let width = |ls: &[(String, Span)]| ls.iter().map(|(l, _)| l.chars().count() as u16 + 1).sum::<u16>() + 4 + commit.chars().count() as u16;
+    if width(&labels) >= area.width {
+        // Too many for their names: numbers only.
+        labels = shell_labels(&d.terms, true).into_iter().enumerate().map(|(i, l)| (l, Span::Shell(i))).collect();
+    }
+    labels.push((" + ".into(), Span::NewShell));
+    labels.push((commit, Span::Commit));
     let mut x = area.x;
-    for tab in [Tab::Terminal, Tab::Commit] {
-        let mut title = format!(" {} ", tab.title());
-        if tab == Tab::Commit && !d.git.entries.is_empty() {
-            title = format!(" {} {} ", tab.title(), d.git.entries.len());
-        }
+    for (title, span) in labels {
         let w = title.chars().count() as u16;
         if x + w >= area.right() {
             break;
         }
-        let active = tab == d.tab;
+        let active = match span {
+            Span::Shell(i) => d.tab == Tab::Terminal && i == d.terms.active_tab(),
+            Span::Commit => d.tab == Tab::Commit,
+            Span::NewShell => false,
+        };
         let style = match (active, d.focused) {
             (true, true) => Style::new().fg(PAPER).bg(ACCENT).add_modifier(Modifier::BOLD),
             (true, false) => Style::new().fg(TEXT).bg(SURFACE_2).add_modifier(Modifier::BOLD),
+            _ if span == Span::NewShell => Style::new().fg(MUTED).bg(SURFACE_1),
             _ => Style::new().fg(TEXT_2).bg(SURFACE_1),
         };
         buf.set_string(x, area.y, &title, style);
-        d.tab_spans.push((x, x + w, tab));
+        d.tab_spans.push((x, x + w, span));
         x += w + 1;
     }
     let hint = match d.tab {
-        Tab::Terminal => " Ctrl+Alt+↑ editor · Alt+F12 hide ",
+        Tab::Terminal => " Alt+T new · Alt+S split · Ctrl+Alt+↑ editor · Alt+F12 hide ",
         Tab::Commit => " Space tick · Enter diff · Tab message · Ctrl+Enter commit ",
     };
     let hw = hint.chars().count() as u16;
@@ -558,17 +672,35 @@ pub fn draw(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
     let body = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(1));
     d.body = body;
     match d.tab {
-        Tab::Terminal => match &mut d.term {
-            Some(t) => {
-                t.resize(body.height, body.width);
-                crate::term::ui::draw(buf, t, body, d.focused)
+        Tab::Terminal if d.terms.is_empty() => {
+            d.pane_rects.clear();
+            buf.set_style(body, Style::new().bg(PAPER));
+            buf.set_stringn(body.x + 1, body.y, "No shell running: Enter starts one", body.width.saturating_sub(2) as usize, Style::new().fg(MUTED));
+            None
+        }
+        Tab::Terminal => {
+            let active = d.terms.active_pane();
+            let focused = d.focused;
+            let rects = pane_rects(body, d.terms.panes_mut().len());
+            let mut cursor = None;
+            for (i, (t, r)) in d.terms.panes_mut().iter_mut().zip(&rects).enumerate() {
+                t.resize(r.height, r.width);
+                let c = crate::term::ui::draw(buf, t, *r, focused && i == active);
+                if i == active {
+                    cursor = c;
+                }
+                if i + 1 < rects.len() {
+                    // The divider lights up next to the pane with the keys.
+                    let lit = focused && (i == active || i + 1 == active);
+                    let style = Style::new().fg(if lit { ACCENT } else { GRID }).bg(PAPER);
+                    for y in r.y..r.bottom() {
+                        buf.set_string(r.right(), y, "│", style);
+                    }
+                }
             }
-            None => {
-                buf.set_style(body, Style::new().bg(PAPER));
-                buf.set_stringn(body.x + 1, body.y, "No shell running: Enter starts one", body.width.saturating_sub(2) as usize, Style::new().fg(MUTED));
-                None
-            }
-        },
+            d.pane_rects = rects;
+            cursor
+        }
         Tab::Commit => {
             let wide = body.width >= 70;
             let (l, m) = if wide {
@@ -583,6 +715,32 @@ pub fn draw(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
             crate::git::ui::draw_panel(buf, &mut d.git, body, d.focused)
         }
     }
+}
+
+/// Tab-row names: the shell's own title when it sets one, else the number. `short`: numbers only.
+fn shell_labels(terms: &Tabs<Terminal>, short: bool) -> Vec<String> {
+    let n = terms.tab_count();
+    if n == 0 {
+        return vec![" Terminal ".into()];
+    }
+    (0..n)
+        .map(|tab| {
+            let panes = terms.tab_panes(tab);
+            let count = if panes.len() > 1 { format!(" ×{}", panes.len()) } else { String::new() };
+            if short {
+                return format!(" {}{count} ", tab + 1);
+            }
+            let title = panes.first().map(|t| t.screen().title().trim().to_string()).unwrap_or_default();
+            let name = if title.is_empty() {
+                "Terminal".to_string()
+            } else {
+                // A title keeps its end: that's where the folder or command is.
+                let chars: Vec<char> = title.chars().filter(|c| !c.is_control()).collect();
+                if chars.len() > 16 { format!("…{}", chars[chars.len() - 15..].iter().collect::<String>()) } else { chars.into_iter().collect() }
+            };
+            if n == 1 { format!(" {name}{count} ") } else { format!(" {} {name}{count} ", tab + 1) }
+        })
+        .collect()
 }
 
 /// Draws what the dock puts over the editor (the diff view).
@@ -616,6 +774,82 @@ mod tests {
         let (ed, dock) = split_rows(Rect::new(0, 0, 80, 6), 12);
         assert!(dock.is_none());
         assert_eq!(ed.height, 6);
+    }
+
+    fn app(cols: u16) -> App {
+        let dir = std::env::temp_dir().join(format!("catlas-shells-{}-{cols}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut a = App::new(vec![dir]).unwrap();
+        a.handle(crossterm::event::Event::Key(KeyEvent::new(KeyCode::F(12), KeyModifiers::ALT)));
+        a.dock.body = Rect::new(0, 0, cols, 10);
+        a
+    }
+    fn press(a: &mut App, code: KeyCode, m: KeyModifiers) {
+        a.handle(crossterm::event::Event::Key(KeyEvent::new(code, m)));
+    }
+
+    #[test]
+    fn keys_open_switch_and_close_shells() {
+        let mut a = app(100);
+        let alt = KeyModifiers::ALT;
+        assert_eq!(a.dock.terms.pane_count(), 1);
+        press(&mut a, KeyCode::Char('t'), alt);
+        assert_eq!((a.dock.terms.tab_count(), a.dock.terms.active_tab()), (2, 1));
+        press(&mut a, KeyCode::Char('s'), alt);
+        assert_eq!((a.dock.terms.tab_count(), a.dock.terms.pane_count(), a.dock.terms.active_pane()), (2, 3, 1));
+        press(&mut a, KeyCode::Right, KeyModifiers::CONTROL | alt);
+        assert_eq!(a.dock.terms.active_tab(), 0, "past the last pane: the next tab, wrapping");
+        press(&mut a, KeyCode::Left, KeyModifiers::CONTROL | alt);
+        assert_eq!((a.dock.terms.active_tab(), a.dock.terms.active_pane()), (1, 1));
+        // Closing a running shell asks first, and any other key disarms it.
+        press(&mut a, KeyCode::Char('w'), alt);
+        assert_eq!(a.dock.terms.pane_count(), 3);
+        assert!(a.message.as_deref().unwrap().contains("again closes"));
+        press(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
+        press(&mut a, KeyCode::Char('w'), alt);
+        assert_eq!(a.dock.terms.pane_count(), 3, "the x disarmed it");
+        press(&mut a, KeyCode::Char('w'), alt);
+        assert_eq!(a.dock.terms.pane_count(), 2);
+        // The kitty-protocol chords do the same.
+        let cs = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        press(&mut a, KeyCode::Char('t'), cs);
+        assert_eq!(a.dock.terms.pane_count(), 3);
+        press(&mut a, KeyCode::Char('d'), cs);
+        assert_eq!(a.dock.terms.pane_count(), 4);
+        press(&mut a, KeyCode::Char('w'), cs);
+        press(&mut a, KeyCode::Char('w'), cs);
+        assert_eq!(a.dock.terms.pane_count(), 3);
+    }
+
+    #[test]
+    fn closing_the_last_shell_hides_the_dock() {
+        let mut a = app(100);
+        press(&mut a, KeyCode::Char('w'), KeyModifiers::ALT);
+        press(&mut a, KeyCode::Char('w'), KeyModifiers::ALT);
+        assert!(a.dock.terms.is_empty());
+        assert!(!a.dock.open && !a.dock.focused);
+        press(&mut a, KeyCode::F(12), KeyModifiers::ALT);
+        assert_eq!(a.dock.terms.pane_count(), 1, "Alt+F12 starts a fresh one");
+    }
+
+    #[test]
+    fn narrow_docks_refuse_a_split() {
+        let mut a = app(40);
+        press(&mut a, KeyCode::Char('s'), KeyModifiers::ALT);
+        assert_eq!(a.dock.terms.pane_count(), 1);
+        assert!(a.message.as_deref().unwrap().contains("No room"));
+    }
+
+    #[test]
+    fn output_goes_to_its_own_shell_and_keys_to_the_active_one() {
+        let mut a = app(100);
+        a.dock.term_mut().unwrap().feed(b"first-shell");
+        press(&mut a, KeyCode::Char('t'), KeyModifiers::ALT);
+        a.dock.term_mut().unwrap().feed(b"second-shell");
+        assert!(a.dock.term().unwrap().screen().contents().contains("second-shell"));
+        assert!(!a.dock.term().unwrap().screen().contents().contains("first-shell"));
+        press(&mut a, KeyCode::Left, KeyModifiers::CONTROL | KeyModifiers::ALT);
+        assert!(a.dock.term().unwrap().screen().contents().contains("first-shell"));
     }
 
     #[test]

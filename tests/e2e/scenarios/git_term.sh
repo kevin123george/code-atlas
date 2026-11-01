@@ -57,3 +57,39 @@ t_git_commit_panel() {
     [ "$(git status --porcelain)" = "?? untracked.txt" ] || fail "unexpected status: $(git status --porcelain)"
     wait_for "Changes 1 · 0 ticked"
 }
+
+# Decision 0018: several shells, as tabs and side-by-side panes.
+t_terminal_tabs_and_splits() {
+    printf 'x\n' > a.txt
+    start 120 30 a.txt
+    key M-F12
+    wait_for "keys go to the shell"
+    sleep 1.5
+    typ "echo one-\$((40+1))"; key Enter
+    wait_for "one-41" 8
+    key M-t                                     # a second shell, in its own tab
+    sleep 1.5
+    wait_gone "one-41"
+    typ "echo two-\$((40+2))"; key Enter
+    wait_for "two-42" 8
+    key C-M-Left                                # back to the first: its screen is still there
+    wait_for "one-41"
+    wait_gone "two-42"
+    key M-s                                     # a pane beside it: both show at once
+    sleep 1.5
+    typ "echo three-\$((40+3))"; key Enter
+    wait_for "three-43" 8
+    wait_for "one-41"
+    wait_for "│"
+    typ "exit"; key Enter                       # a shell that ends takes its pane with it
+    wait_gone "three-43" 8
+    wait_for "one-41"
+    key M-w                                     # closing a running shell asks first
+    wait_for "again closes it"
+    wait_for "one-41"
+    key M-w
+    wait_for "two-42"                           # the other tab takes over
+    key C-M-Up                                  # the editor still gets keys
+    typ "Z"
+    wait_line 1 "Zx"
+}

@@ -292,11 +292,12 @@ pub fn rows(c: Ctx) -> &'static [Hint] {
         ] },
         Ctx::Terminal => const { &[
             h("Ctrl+Alt+↑", "back to editor"),
+            h("Alt+T", "new shell"),
+            h("Alt+S", "split right"),
+            h("Ctrl+Alt+←/→", "switch shell"),
+            h("Alt+W", "close shell"),
             h("Alt+F12", "hide terminal"),
-            h("Shift+Esc", "hide terminal"),
             h("Shift+PgUp/PgDn", "scroll back"),
-            h("Alt+0", "commit panel"),
-            h("Alt+1/9", "project / agents"),
             h("Ctrl+Shift+↑/↓", "taller / shorter"),
         ] },
         Ctx::Commit => const { &[

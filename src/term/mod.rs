@@ -4,6 +4,7 @@
 
 pub mod keys;
 pub mod ui;
+pub mod tabs;
 
 use std::io::{Read, Write};
 use std::path::Path;
