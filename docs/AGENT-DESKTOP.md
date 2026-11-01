@@ -1,4 +1,6 @@
-# Terminal-first agent desktop
+# Terminal-first agent desktop (parked)
+
+Latest direction: [0022](decisions/0022-neovim-agent-workspace.md) keeps Neovim as the primary interface. Desktop-specific architecture below is historical; workflow requirements remain useful.
 
 2026-11-01. Product scope accepted by astra in conversation. Architecture below is proposed; this document does not claim implementation.
 

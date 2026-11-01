@@ -652,3 +652,7 @@ commit message (append-only editing), Problems tab (M3 diagnostics could go ther
 ## Agent desktop direction (2026-11-01)
 
 Product design reopened by astra: terminal-first desktop for directing Claude/Codex, durable sessions, worktree tasks and reviews. Read [docs/AGENT-DESKTOP.md](docs/AGENT-DESKTOP.md) and [decision 0021](docs/decisions/0021-terminal-first-agent-desktop.md). Scope accepted; architecture proposed; runtime implementation pending. Daily Neovim remains available.
+
+## Latest direction: Neovim (2026-11-01)
+
+Astra prefers the existing Neovim setup. Decision 0022 supersedes the standalone desktop direction; desktop implementation is paused. Carry session/worktree/review requirements into Neovim incrementally.

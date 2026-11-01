@@ -1,6 +1,6 @@
 # 0021: Terminal-first agent desktop direction
 
-Date: 2026-11-01. Status: scope accepted; implementation architecture proposed.
+Date: 2026-11-01. Status: desktop direction superseded by 0022; workflow requirements retained.
 
 ## Context
 

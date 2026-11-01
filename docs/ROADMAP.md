@@ -26,3 +26,7 @@ Own new files freely; touch `app.rs` / `ui.rs` / `main.rs` only with small hooks
 ## Terminal-first agent desktop (2026-11-01)
 
 See [scope and acceptance checks](AGENT-DESKTOP.md) and [decision 0021](decisions/0021-terminal-first-agent-desktop.md). Sequence: durable session supervisor → task desktop → attention events → review workflow → Java/Markdown and large-repo polish. Design recorded; implementation pending.
+
+## Latest direction: Neovim (2026-11-01)
+
+Astra prefers the existing Neovim setup. Decision 0022 supersedes the standalone desktop direction; desktop implementation is paused. Carry session/worktree/review requirements into Neovim incrementally.
