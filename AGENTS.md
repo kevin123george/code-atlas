@@ -648,3 +648,7 @@ commit flow) and e2e `tests/e2e/scenarios/git_term.sh` (terminal echo/ls, gutter
 commit landing in `git log`). Not done yet: mouse forwarding to terminal programs,
 copying text out of the terminal, side-by-side diff, staging single hunks, rollback/revert, a cursor in the
 commit message (append-only editing), Problems tab (M3 diagnostics could go there).
+
+## Agent desktop direction (2026-11-01)
+
+Product design reopened by astra: terminal-first desktop for directing Claude/Codex, durable sessions, worktree tasks and reviews. Read [docs/AGENT-DESKTOP.md](docs/AGENT-DESKTOP.md) and [decision 0021](docs/decisions/0021-terminal-first-agent-desktop.md). Scope accepted; architecture proposed; runtime implementation pending. Daily Neovim remains available.

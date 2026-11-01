@@ -22,3 +22,7 @@ Own new files freely; touch `app.rs` / `ui.rs` / `main.rs` only with small hooks
 | several-terminals | Several shells in the dock: tabs + side-by-side panes, switch, close with a question | `src/term/tabs.rs` (+ `dock.rs`, `hints/`) | done 2026-11-01 (decision 0018) |
 | lang-support | Excellent daily languages: Markdown, Java, YAML, JSON, shell | `src/syntax/markdown.rs`, `src/syntax/enter.rs` (+ `doc.rs`, `lsp/`) | first pass 2026-11-01 (decision 0019; left: marksman, shfmt, Markdown preview) |
 | M7 | Command palette (Ctrl+Shift+A "Find Action"), settings file (started by key-hints as `~/.config/code-atlas/settings.toml`, `src/config.rs`), themes | `src/palette/`, `src/config.rs` | later |
+
+## Terminal-first agent desktop (2026-11-01)
+
+See [scope and acceptance checks](AGENT-DESKTOP.md) and [decision 0021](decisions/0021-terminal-first-agent-desktop.md). Sequence: durable session supervisor → task desktop → attention events → review workflow → Java/Markdown and large-repo polish. Design recorded; implementation pending.
